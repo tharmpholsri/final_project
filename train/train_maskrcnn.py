@@ -47,7 +47,7 @@ import numpy as np
 import torch
 from pycocotools import mask as mask_utils
 from torch.optim.lr_scheduler import StepLR
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader
 
 from final_project.data.dataset import LettuceCOCODataset, collate_fn
 from final_project.data.transforms import (
@@ -274,8 +274,27 @@ def parse_args() -> argparse.Namespace:
         "--train-images",
         default="Plant_Phenotyping_Datasets/Plant_Phenotyping_Datasets/Plant",
     )
+    ap.add_argument(
+        "--train-coco-extra", default=None,
+        help="optional 2nd training COCO (e.g. PACE canopy annotations)",
+    )
+    ap.add_argument(
+        "--train-images-extra", default=None,
+        help="image dir for --train-coco-extra (e.g. crops_full/images)",
+    )
     ap.add_argument("--val-coco", default="annotations/instances_validation.json")
     ap.add_argument("--val-images", default="crops_full/images")
+
+    # Copy-paste augmentation (applied to the extra/PACE source only)
+    ap.add_argument("--copy-paste", action="store_true",
+                    help="enable copy-paste augmentation on --train-coco-extra")
+    ap.add_argument("--leaf-bank", default="leaf_bank")
+    ap.add_argument("--pots-dir", default="crops_full/pots")
+    ap.add_argument("--cp-stage-match", choices=["strict", "off"], default="strict")
+    ap.add_argument("--cp-p-apply", type=float, default=0.5,
+                    help="probability of applying copy-paste per image")
+    ap.add_argument("--cp-n-paste-min", type=int, default=1)
+    ap.add_argument("--cp-n-paste-max", type=int, default=4)
 
     # Model
     ap.add_argument("--num-classes", type=int, default=2)
@@ -333,18 +352,61 @@ def main() -> None:
     print(f"seed:   {args.seed}")
 
     # Datasets + loaders
-    train_ds = LettuceCOCODataset(
+    # Primary source (CVPPP by default) — no copy-paste, just basic aug.
+    primary_ds = LettuceCOCODataset(
         images_dir=args.train_images,
         coco_path=args.train_coco,
-        transforms=get_train_transforms(),
+        transforms=get_train_transforms(copy_paste=None),
     )
+    print(f"train (primary): {len(primary_ds)} images  "
+          f"(dropped {primary_ds._dropped} with no anns)")
+
+    datasets: list = [primary_ds]
+
+    # Optional 2nd source (PACE canopy) — gets copy-paste if --copy-paste.
+    if args.train_coco_extra and args.train_images_extra:
+        cp_transform = None
+        if args.copy_paste:
+            from final_project.augment.copy_paste import (
+                CopyPaste, make_filename_lookup, make_pot_loader,
+            )
+            pot_loader = make_pot_loader(
+                args.train_coco_extra, args.pots_dir,
+            )
+            name_lookup = make_filename_lookup(args.train_coco_extra)
+            cp_transform = CopyPaste(
+                leaf_bank_dir=args.leaf_bank,
+                pot_mask_loader=pot_loader,
+                filename_from_image_id=name_lookup,
+                stage_match=args.cp_stage_match,
+                p_apply=args.cp_p_apply,
+                n_paste_range=(args.cp_n_paste_min, args.cp_n_paste_max),
+                seed=args.seed,
+            )
+            print(f"copy-paste: ENABLED on {args.train_coco_extra}")
+            print(f"            leaf bank size: {len(cp_transform.bank)}  "
+                  f"stages: {cp_transform.bank.stages()}")
+        else:
+            print(f"copy-paste: disabled (still adding extra source as plain training data)")
+
+        extra_ds = LettuceCOCODataset(
+            images_dir=args.train_images_extra,
+            coco_path=args.train_coco_extra,
+            transforms=get_train_transforms(copy_paste=cp_transform),
+        )
+        print(f"train (extra):   {len(extra_ds)} images  "
+              f"(dropped {extra_ds._dropped} with no anns)")
+        datasets.append(extra_ds)
+
+    train_ds = ConcatDataset(datasets) if len(datasets) > 1 else primary_ds
+    total_imgs = sum(len(d) for d in datasets)
+    print(f"train (combined): {total_imgs} images across {len(datasets)} source(s)")
+
     val_ds = LettuceCOCODataset(
         images_dir=args.val_images,
         coco_path=args.val_coco,
         transforms=get_eval_transforms(),
     )
-    print(f"train: {len(train_ds)} images  "
-          f"(dropped {train_ds._dropped} with no anns)")
     print(f"val:   {len(val_ds)} images  "
           f"(dropped {val_ds._dropped} with no anns)")
 
