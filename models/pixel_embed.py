@@ -95,8 +95,10 @@ class PixelEmbeddingModel(nn.Module):
         pretrained: bool = True,
         trainable_backbone_layers: int = 3,
         head_channels: int = 256,
+        embedding_dim: int = 16,
     ):
         super().__init__()
+        self.embedding_dim = embedding_dim
         weights = (
             MaskRCNN_ResNet50_FPN_V2_Weights.COCO_V1 if pretrained else None
         )
@@ -119,7 +121,7 @@ class PixelEmbeddingModel(nn.Module):
         )
         # Two 1×1 conv heads.
         self.semantic_head = nn.Conv2d(head_channels, 1, kernel_size=1)
-        self.embedding_head = nn.Conv2d(head_channels, 1, kernel_size=1)
+        self.embedding_head = nn.Conv2d(head_channels, embedding_dim, kernel_size=1)
 
         # Pre-compute normalisation buffers so they move with .to(device).
         self.register_buffer(
@@ -141,7 +143,8 @@ class PixelEmbeddingModel(nn.Module):
         Returns a list of dicts, one per input image:
             {
               'semantic':  (H, W) torch.float32 logits
-              'embedding': (H, W) torch.float32 real-valued tag
+              'embedding': (D, H, W) torch.float32 real-valued tag
+                           (D = embedding_dim)
             }
         """
         outputs: list[dict] = []
@@ -157,14 +160,14 @@ class PixelEmbeddingModel(nn.Module):
 
             shared = self.shared(p2)
             sem = self.semantic_head(shared)                  # (1, 1, H/4, W/4)
-            emb = self.embedding_head(shared)                 # (1, 1, H/4, W/4)
+            emb = self.embedding_head(shared)                 # (1, D, H/4, W/4)
 
             sem = F.interpolate(sem, size=(H, W), mode="bilinear", align_corners=False)
             emb = F.interpolate(emb, size=(H, W), mode="bilinear", align_corners=False)
 
             outputs.append({
                 "semantic":  sem[0, 0],   # (H, W)
-                "embedding": emb[0, 0],   # (H, W)
+                "embedding": emb[0],      # (D, H, W)
             })
         return outputs
 
@@ -173,12 +176,14 @@ def build_pixel_embed_model(
     pretrained: bool = True,
     trainable_backbone_layers: int = 3,
     head_channels: int = 256,
+    embedding_dim: int = 16,
 ) -> PixelEmbeddingModel:
     """Factory mirroring `final_project.models.mask_rcnn.build_maskrcnn`."""
     return PixelEmbeddingModel(
         pretrained=pretrained,
         trainable_backbone_layers=trainable_backbone_layers,
         head_channels=head_channels,
+        embedding_dim=embedding_dim,
     )
 
 
@@ -229,8 +234,11 @@ class TaggingLoss(nn.Module):
     def _sample_tags(
         self, tag_map: torch.Tensor, mask: torch.Tensor, k: int
     ) -> torch.Tensor | None:
-        """Randomly sample k tag values from inside a single instance mask.
-        Returns a (k,) tensor or None if the mask is too small."""
+        """Randomly sample k tag vectors from inside a single instance mask.
+
+        tag_map shape: (D, H, W). Returns a (k, D) tensor or None if the
+        mask is too small.
+        """
         ys, xs = torch.where(mask)
         n_px = ys.numel()
         if n_px < self.min_pixels:
@@ -239,7 +247,8 @@ class TaggingLoss(nn.Module):
             idx = torch.randperm(n_px, device=mask.device)[:k]
         else:
             idx = torch.randint(0, n_px, (k,), device=mask.device)
-        return tag_map[ys[idx], xs[idx]]
+        # tag_map[:, ys[idx], xs[idx]] has shape (D, k); transpose to (k, D)
+        return tag_map[:, ys[idx], xs[idx]].t()
 
     def forward(self, predictions: list[dict], targets: list[dict]) -> dict:
         """
@@ -266,12 +275,13 @@ class TaggingLoss(nn.Module):
             if masks.numel() == 0:
                 continue
 
-            # ── Detection loss: MSE on sigmoid(heatmap) vs union of masks
-            # Paper uses MSE on the heatmap directly; we apply sigmoid
-            # first for numerical stability (target is binary {0,1}).
+            # ── Detection loss: BCE with logits (target = union of masks).
+            # v3 change: was MSE-on-sigmoid which saturates; BCE keeps
+            # gradients informative even at extreme logits.
             det_target = (masks.sum(dim=0) > 0).float()
-            det_pred = torch.sigmoid(sem_logit)
-            det_sum = det_sum + F.mse_loss(det_pred, det_target, reduction="mean")
+            det_sum = det_sum + F.binary_cross_entropy_with_logits(
+                sem_logit, det_target, reduction="mean"
+            )
 
             # ── Sample K pixels per instance
             sampled: list[torch.Tensor] = []
@@ -286,28 +296,31 @@ class TaggingLoss(nn.Module):
                 n_imgs += 1
                 continue
 
-            # ── Pull: pairwise (h(x) - h(x'))² inside each instance
+            # ── Pull: pairwise ||h(x) - h(x')||² inside each instance
+            # v3: tags shape (K, D), use squared-L2 over D.
             # Normalised per pair (mean over K² pairs), then per instance.
             pull_per_img = torch.zeros((), device=device)
             for tags in sampled:
-                diff = tags.unsqueeze(0) - tags.unsqueeze(1)     # (K, K)
-                pull_per_img = pull_per_img + (diff ** 2).mean()
+                diff = tags.unsqueeze(0) - tags.unsqueeze(1)     # (K, K, D)
+                pull_per_img = pull_per_img + (diff ** 2).sum(-1).mean()
             pull_per_img = pull_per_img / n_valid
             pull_sum = pull_sum + pull_per_img
             n_imgs_with_inst += 1
 
-            # ── Push: pairwise exp(-d² / 2σ²) across instance pairs
+            # ── Push: pairwise exp(-||·||² / 2σ²) across instance pairs
+            # v3: D-dim squared distance.
             # Normalised per pixel-pair, then per instance-pair.
             if n_valid >= 2:
-                all_tags = torch.stack(sampled)                   # (N_inst, K)
+                all_tags = torch.stack(sampled)                   # (N_inst, K, D)
                 push_per_img = torch.zeros((), device=device)
                 n_inst_pairs = 0
                 two_sigma2 = 2.0 * self.sigma ** 2
                 for i in range(n_valid):
                     for j in range(i + 1, n_valid):
-                        d = all_tags[i].unsqueeze(0) - all_tags[j].unsqueeze(1)
+                        d = all_tags[i].unsqueeze(0) - all_tags[j].unsqueeze(1)  # (K,K,D)
+                        d2 = (d * d).sum(-1)                                     # (K,K)
                         push_per_img = push_per_img + torch.exp(
-                            -(d * d) / two_sigma2
+                            -d2 / two_sigma2
                         ).mean()
                         n_inst_pairs += 1
                 push_per_img = push_per_img / n_inst_pairs
