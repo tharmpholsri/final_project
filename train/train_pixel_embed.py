@@ -149,7 +149,7 @@ def train_one_epoch(
 ) -> dict:
     """One epoch of training. Returns mean loss components for the epoch."""
     model.train()
-    sums = {"loss_pull": 0.0, "loss_push": 0.0, "loss_semantic": 0.0, "total": 0.0}
+    sums = {"loss_pull": 0.0, "loss_push": 0.0, "loss_detection": 0.0, "total": 0.0}
     n_batches = 0
     t0 = time.time()
 
@@ -180,7 +180,7 @@ def train_one_epoch(
                 f"  epoch {epoch}  iter {i + 1:4d}/{len(loader)}  "
                 f"pull={losses['loss_pull'].item():.3f}  "
                 f"push={losses['loss_push'].item():.3f}  "
-                f"sem={losses['loss_semantic'].item():.3f}  "
+                f"sem={losses['loss_detection'].item():.3f}  "
                 f"total={losses['total'].item():.3f}  lr={lr:.2e}"
             )
 
@@ -188,7 +188,7 @@ def train_one_epoch(
     avg = {k: v / max(n_batches, 1) for k, v in sums.items()}
     print(
         f"  epoch {epoch} train  pull={avg['loss_pull']:.3f}  "
-        f"push={avg['loss_push']:.3f}  sem={avg['loss_semantic']:.3f}  "
+        f"push={avg['loss_push']:.3f}  sem={avg['loss_detection']:.3f}  "
         f"total={avg['total']:.3f}  ({elapsed:.1f}s, {n_batches} batches)"
     )
     return avg
@@ -208,7 +208,7 @@ def validate_loss(
     metrics) lives in `evaluate_pixel_embed.py`.
     """
     model.eval()
-    sums = {"loss_pull": 0.0, "loss_push": 0.0, "loss_semantic": 0.0, "total": 0.0}
+    sums = {"loss_pull": 0.0, "loss_push": 0.0, "loss_detection": 0.0, "total": 0.0}
     n = 0
     for idx in range(len(dataset)):
         image, target = dataset[idx]
@@ -263,11 +263,13 @@ def parse_args() -> argparse.Namespace:
     # Loss
     ap.add_argument("--sigma", type=float, default=1.0,
                     help="Gaussian bandwidth for the push term")
+    ap.add_argument("--n-sample", type=int, default=20,
+                    help="K pixels sampled per instance for pairwise terms")
     ap.add_argument("--min-pixels", type=int, default=10,
                     help="ignore instances with fewer than this many pixels")
     ap.add_argument("--lambda-pull", type=float, default=1.0)
     ap.add_argument("--lambda-push", type=float, default=1.0)
-    ap.add_argument("--lambda-semantic", type=float, default=1.0)
+    ap.add_argument("--lambda-detection", type=float, default=1.0)
 
     # Training
     ap.add_argument("--epochs", type=int, default=25)
@@ -384,10 +386,11 @@ def main() -> None:
     ).to(device)
     loss_fn = TaggingLoss(
         sigma=args.sigma,
+        n_sample=args.n_sample,
         min_pixels=args.min_pixels,
         lambda_pull=args.lambda_pull,
         lambda_push=args.lambda_push,
-        lambda_semantic=args.lambda_semantic,
+        lambda_detection=args.lambda_detection,
     )
 
     n_total = sum(p.numel() for p in model.parameters())
@@ -452,7 +455,7 @@ def main() -> None:
         print(
             f"  val pull={val_losses['loss_pull']:.3f}  "
             f"push={val_losses['loss_push']:.3f}  "
-            f"sem={val_losses['loss_semantic']:.3f}  "
+            f"sem={val_losses['loss_detection']:.3f}  "
             f"total={val_losses['total']:.3f}"
         )
 

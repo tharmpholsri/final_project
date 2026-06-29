@@ -33,19 +33,28 @@ segment-then-group) on identical pretrained weights.
 
 Loss
 ----
-The loss matches Newell et al.'s "tagging loss" with three components:
+The loss follows Newell et al. 2016 Section 3.4 (Instance Segmentation)
+**byte-for-byte**:
 
-    L_total = L_pull + L_push + λ_sem * L_semantic
+    L_pull(per image)  = Σ_n Σ_{x,x' ∈ S_n} (h(x) - h(x'))²
+    L_push(per image)  = Σ_{n≠n'} Σ_{x ∈ S_n, x' ∈ S_{n'}}
+                            exp(-(h(x) - h(x'))² / 2σ²)
+    L_detection        = MSE between the predicted detection heatmap
+                         (sigmoid of semantic logits) and the union of
+                         instance masks
 
-  L_pull       mean squared deviation of pixel tags from their
-               instance's mean tag — encourages tag agreement within
-               an instance
-  L_push       Gaussian penalty exp(-(μ_i - μ_j)² / 2σ²) on every
-               pair of instance means — encourages large separation
-               between instances
-  L_semantic   binary cross-entropy on the semantic score against
-               the foreground mask (union of all instance masks) —
-               teaches the model what counts as a leaf at all
+    L_total = λ_pull · L_pull + λ_push · L_push + λ_det · L_detection
+
+Where S_n is a set of K randomly-sampled pixel locations inside the
+n-th object instance (paper recommends a "small set"; we use K=20 by
+default). Pairwise sums are normalised by the number of pairs so the
+loss magnitude stays roughly stable as the number of instances per
+image varies.
+
+Detection: paper uses MSE on the heatmap "without sigmoid" but for
+numerical stability we apply sigmoid to the logits before MSE (target
+is the {0,1} union of instance masks). This is mathematically a
+constrained version of MSE-on-raw with the same gradient direction.
 
 Usage
 -----
@@ -177,46 +186,73 @@ def build_pixel_embed_model(
 # Loss — Newell associative-embedding / tagging loss
 # ════════════════════════════════════════════════════════════════════
 class TaggingLoss(nn.Module):
-    """Pull + push + semantic-BCE loss for pixel-wise associative embedding.
+    """Pull + push + MSE-detection loss for pixel-wise associative embedding.
+
+    Implements Newell et al. 2016 Section 3.4 (Instance Segmentation)
+    formula:
+
+        L_pull = Σ_n Σ_{x,x' ∈ S_n} (h(x) - h(x'))²
+        L_push = Σ_{n,n'} Σ_{x ∈ S_n, x' ∈ S_{n'}}
+                    exp(-(h(x) - h(x'))² / 2σ²)
+
+    where S_n is a random sample of `n_sample` pixels from the n-th
+    instance mask. Pairwise sums are normalised by the number of pairs
+    (per-instance for pull, per-instance-pair for push) so the loss
+    magnitude does not scale with K² or the number of instances.
 
     Args:
-        sigma: Gaussian bandwidth for the push term. Smaller sigma
-            penalises closer means more sharply.
-        min_pixels: instances with fewer than this many pixels (after
-            ground-truth masking) are skipped to avoid noisy means.
-        lambda_pull, lambda_push, lambda_semantic: scalar weights on
-            each loss component.
+        sigma: Gaussian bandwidth for the push term.
+        n_sample: K — number of pixels sampled per instance for the
+            pairwise pull/push terms (paper recommends "a small set").
+        min_pixels: instances with fewer than this many pixels are
+            skipped; tiny instances would otherwise yield noisy samples.
+        lambda_pull, lambda_push, lambda_detection: scalar weights.
     """
 
     def __init__(
         self,
         sigma: float = 1.0,
+        n_sample: int = 20,
         min_pixels: int = 10,
         lambda_pull: float = 1.0,
         lambda_push: float = 1.0,
-        lambda_semantic: float = 1.0,
+        lambda_detection: float = 1.0,
     ):
         super().__init__()
         self.sigma = sigma
+        self.n_sample = n_sample
         self.min_pixels = min_pixels
         self.lambda_pull = lambda_pull
         self.lambda_push = lambda_push
-        self.lambda_semantic = lambda_semantic
+        self.lambda_detection = lambda_detection
+
+    def _sample_tags(
+        self, tag_map: torch.Tensor, mask: torch.Tensor, k: int
+    ) -> torch.Tensor | None:
+        """Randomly sample k tag values from inside a single instance mask.
+        Returns a (k,) tensor or None if the mask is too small."""
+        ys, xs = torch.where(mask)
+        n_px = ys.numel()
+        if n_px < self.min_pixels:
+            return None
+        if n_px >= k:
+            idx = torch.randperm(n_px, device=mask.device)[:k]
+        else:
+            idx = torch.randint(0, n_px, (k,), device=mask.device)
+        return tag_map[ys[idx], xs[idx]]
 
     def forward(self, predictions: list[dict], targets: list[dict]) -> dict:
         """
         predictions: list of dicts with keys 'semantic' and 'embedding',
-            each a (H, W) tensor of the corresponding image's size.
+            each a (H, W) tensor sized to the original image.
         targets: list of dicts with 'masks' tensor (N, H, W) uint8/bool.
-
-        Returns a dict of named loss tensors plus 'total'.
         """
         device = predictions[0]["semantic"].device
         pull_sum = torch.zeros((), device=device)
         push_sum = torch.zeros((), device=device)
-        sem_sum = torch.zeros((), device=device)
+        det_sum = torch.zeros((), device=device)
         n_imgs = 0
-        n_imgs_with_instances = 0
+        n_imgs_with_inst = 0
         n_imgs_with_pairs = 0
 
         for pred, tgt in zip(predictions, targets):
@@ -230,64 +266,69 @@ class TaggingLoss(nn.Module):
             if masks.numel() == 0:
                 continue
 
-            # ── Semantic loss: union of instance masks vs sigmoid score
-            sem_target = (masks.sum(dim=0) > 0).float()
-            sem_sum = sem_sum + F.binary_cross_entropy_with_logits(
-                sem_logit, sem_target, reduction="mean"
-            )
+            # ── Detection loss: MSE on sigmoid(heatmap) vs union of masks
+            # Paper uses MSE on the heatmap directly; we apply sigmoid
+            # first for numerical stability (target is binary {0,1}).
+            det_target = (masks.sum(dim=0) > 0).float()
+            det_pred = torch.sigmoid(sem_logit)
+            det_sum = det_sum + F.mse_loss(det_pred, det_target, reduction="mean")
 
-            # ── Pull: tags of same instance close to instance mean
-            instance_means: list[torch.Tensor] = []
-            pull_per_img = torch.zeros((), device=device)
-            n_valid_inst = 0
+            # ── Sample K pixels per instance
+            sampled: list[torch.Tensor] = []
             for k in range(masks.shape[0]):
-                m = masks[k] > 0.5
-                if int(m.sum().item()) < self.min_pixels:
-                    continue
-                tags_k = tag_map[m]                    # (P_k,)
-                mean_k = tags_k.mean()
-                pull_per_img = pull_per_img + ((tags_k - mean_k) ** 2).mean()
-                instance_means.append(mean_k)
-                n_valid_inst += 1
-
-            if n_valid_inst > 0:
-                pull_sum = pull_sum + pull_per_img / n_valid_inst
-                n_imgs_with_instances += 1
-
-            # ── Push: every unordered pair of means
-            n_means = len(instance_means)
-            if n_means >= 2:
-                stacked = torch.stack(instance_means)   # (N,)
-                # pairwise squared distances
-                diff = stacked.unsqueeze(0) - stacked.unsqueeze(1)
-                d2 = diff * diff
-                # upper-triangle excluding diagonal
-                triu_mask = torch.triu(
-                    torch.ones_like(d2, dtype=torch.bool), diagonal=1
+                tags_k = self._sample_tags(
+                    tag_map, masks[k] > 0.5, self.n_sample
                 )
-                pairs_d2 = d2[triu_mask]
-                push_per_img = torch.exp(
-                    -pairs_d2 / (2.0 * self.sigma ** 2)
-                ).mean()
+                if tags_k is not None:
+                    sampled.append(tags_k)
+            n_valid = len(sampled)
+            if n_valid == 0:
+                n_imgs += 1
+                continue
+
+            # ── Pull: pairwise (h(x) - h(x'))² inside each instance
+            # Normalised per pair (mean over K² pairs), then per instance.
+            pull_per_img = torch.zeros((), device=device)
+            for tags in sampled:
+                diff = tags.unsqueeze(0) - tags.unsqueeze(1)     # (K, K)
+                pull_per_img = pull_per_img + (diff ** 2).mean()
+            pull_per_img = pull_per_img / n_valid
+            pull_sum = pull_sum + pull_per_img
+            n_imgs_with_inst += 1
+
+            # ── Push: pairwise exp(-d² / 2σ²) across instance pairs
+            # Normalised per pixel-pair, then per instance-pair.
+            if n_valid >= 2:
+                all_tags = torch.stack(sampled)                   # (N_inst, K)
+                push_per_img = torch.zeros((), device=device)
+                n_inst_pairs = 0
+                two_sigma2 = 2.0 * self.sigma ** 2
+                for i in range(n_valid):
+                    for j in range(i + 1, n_valid):
+                        d = all_tags[i].unsqueeze(0) - all_tags[j].unsqueeze(1)
+                        push_per_img = push_per_img + torch.exp(
+                            -(d * d) / two_sigma2
+                        ).mean()
+                        n_inst_pairs += 1
+                push_per_img = push_per_img / n_inst_pairs
                 push_sum = push_sum + push_per_img
                 n_imgs_with_pairs += 1
 
             n_imgs += 1
 
-        n_safe = max(n_imgs, 1)
-        loss_pull = pull_sum / max(n_imgs_with_instances, 1)
+        loss_pull = pull_sum / max(n_imgs_with_inst, 1)
         loss_push = push_sum / max(n_imgs_with_pairs, 1)
-        loss_sem = sem_sum / n_safe
+        loss_det = det_sum / max(n_imgs, 1)
 
         total = (
             self.lambda_pull * loss_pull
             + self.lambda_push * loss_push
-            + self.lambda_semantic * loss_sem
+            + self.lambda_detection * loss_det
         )
         return {
             "loss_pull": loss_pull,
             "loss_push": loss_push,
-            "loss_semantic": loss_sem,
+            "loss_detection": loss_det,
             "total": total,
         }
 
@@ -341,7 +382,7 @@ if __name__ == "__main__":
     loss_fn = TaggingLoss()
     losses = loss_fn(preds, targets)
     for k, v in losses.items():
-        print(f"  {k:<14}: {v.item():.4f}")
+        print(f"  {k:<15}: {v.item():.4f}")
 
     # Ensure backward works
     losses["total"].backward()
