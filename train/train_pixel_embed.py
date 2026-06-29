@@ -259,6 +259,8 @@ def parse_args() -> argparse.Namespace:
     # Model
     ap.add_argument("--trainable-backbone-layers", type=int, default=3)
     ap.add_argument("--head-channels", type=int, default=256)
+    ap.add_argument("--embedding-dim", type=int, default=16,
+                    help="dimensionality of the per-pixel tag (v3 default)")
 
     # Loss
     ap.add_argument("--sigma", type=float, default=1.0,
@@ -383,6 +385,7 @@ def main() -> None:
         pretrained=True,
         trainable_backbone_layers=args.trainable_backbone_layers,
         head_channels=args.head_channels,
+        embedding_dim=args.embedding_dim,
     ).to(device)
     loss_fn = TaggingLoss(
         sigma=args.sigma,
