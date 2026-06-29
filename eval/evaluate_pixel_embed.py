@@ -72,12 +72,14 @@ def load_trained_model(
     device: torch.device,
     trainable_backbone_layers: int = 3,
     head_channels: int = 256,
+    embedding_dim: int = 16,
 ) -> torch.nn.Module:
     """Build the pixel-embed model and load weights from a checkpoint."""
     model = build_pixel_embed_model(
         pretrained=False,
         trainable_backbone_layers=trainable_backbone_layers,
         head_channels=head_channels,
+        embedding_dim=embedding_dim,
     )
     state = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if isinstance(state, dict) and "model" in state:
@@ -110,7 +112,7 @@ def load_plant_mask(
     return fg
 
 
-def cluster_tags_1d(
+def cluster_tags_kd(
     tag_map: np.ndarray,
     foreground: np.ndarray,
     bandwidth: float,
@@ -118,20 +120,31 @@ def cluster_tags_1d(
     max_fit_points: int = 30000,
     rng: np.random.RandomState | None = None,
 ) -> tuple[list[np.ndarray], np.ndarray | None]:
-    """Cluster foreground tag values with mean-shift; return per-cluster masks.
+    """Cluster foreground tag vectors with mean-shift; return per-cluster masks.
+
+    Accepts either a 2-D tag map (H, W)  — legacy 1-D embedding —
+    or a 3-D tag map (D, H, W) — multi-dim embedding (v3).
 
     Returns:
-        masks: list of (H, W) uint8 binary masks, one per cluster
-            (after dropping clusters smaller than `min_pixels`).
-        labels: full-resolution per-foreground-pixel label array — useful
-            for visualisation / debugging.
+        masks: list of (H, W) uint8 binary masks, one per cluster.
+        labels: full-resolution per-foreground-pixel label array.
     """
-    H, W = tag_map.shape
+    if tag_map.ndim == 2:
+        H, W = tag_map.shape
+        D = 1
+    elif tag_map.ndim == 3:
+        D, H, W = tag_map.shape
+    else:
+        raise ValueError(f"tag_map must be (H,W) or (D,H,W); got {tag_map.shape}")
+
     ys, xs = np.where(foreground > 0)
     if ys.size == 0:
         return [], None
 
-    fg_tags = tag_map[ys, xs].reshape(-1, 1).astype(np.float32)
+    if tag_map.ndim == 2:
+        fg_tags = tag_map[ys, xs].reshape(-1, 1).astype(np.float32)
+    else:
+        fg_tags = tag_map[:, ys, xs].T.astype(np.float32)        # (N_fg, D)
 
     # Subsample for speed during the cluster-fit step.
     if fg_tags.shape[0] > max_fit_points:
@@ -241,7 +254,7 @@ def run_inference(
         else:
             foreground = plant_fg
 
-        cluster_masks, _ = cluster_tags_1d(
+        cluster_masks, _ = cluster_tags_kd(
             tag_map, foreground,
             bandwidth=bandwidth,
             min_pixels=min_pixels,
@@ -362,6 +375,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--checkpoint", default="checkpoints/pixel_embed_best.pth")
     ap.add_argument("--trainable-backbone-layers", type=int, default=3)
     ap.add_argument("--head-channels", type=int, default=256)
+    ap.add_argument("--embedding-dim", type=int, default=16,
+                    help="must match the dim the checkpoint was trained with")
 
     # Clustering
     ap.add_argument("--bandwidth", type=float, default=0.5,
@@ -378,8 +393,9 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--sweep", action="store_true",
                     help="sweep bandwidth and pick the best by AP50")
     ap.add_argument("--sweep-bandwidths",
-                    default="0.1,0.2,0.3,0.5,0.75,1.0,1.5",
-                    help="comma-separated bandwidths for --sweep")
+                    default="0.3,0.5,0.75,1.0,1.5,2.0,3.0,5.0",
+                    help="comma-separated bandwidths for --sweep. "
+                         "v3 default range widened for D-dim embedding space.")
 
     # Outputs
     ap.add_argument("--out", default="results/pixel_embed_val.json")
@@ -403,6 +419,7 @@ def main() -> None:
         args.checkpoint, device,
         trainable_backbone_layers=args.trainable_backbone_layers,
         head_channels=args.head_channels,
+        embedding_dim=args.embedding_dim,
     )
     if meta.get("epoch") is not None:
         print(f"  loaded from epoch {meta['epoch'] + 1}  "
