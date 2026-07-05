@@ -272,6 +272,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--lambda-pull", type=float, default=1.0)
     ap.add_argument("--lambda-push", type=float, default=1.0)
     ap.add_argument("--lambda-detection", type=float, default=1.0)
+    ap.add_argument(
+        "--detection-loss", choices=["bce", "mse"], default="bce",
+        help="foreground objective; use mse for the paper-like heatmap loss",
+    )
 
     # Training
     ap.add_argument("--epochs", type=int, default=25)
@@ -394,6 +398,7 @@ def main() -> None:
         lambda_pull=args.lambda_pull,
         lambda_push=args.lambda_push,
         lambda_detection=args.lambda_detection,
+        detection_loss=args.detection_loss,
     )
 
     n_total = sum(p.numel() for p in model.parameters())

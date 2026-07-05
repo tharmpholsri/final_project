@@ -7,7 +7,8 @@ and Grouping" (https://arxiv.org/abs/1611.05424). For each image, the
 network predicts two pixel-wise quantities:
 
   1. a foreground/background score (1 channel, sigmoid)
-  2. an identity tag (1 channel, real-valued scalar)
+  2. an identity embedding (D channels; D=16 by default, or D=1 for
+     the paper-like scalar-tag experiment)
 
 The tags are trained with a *grouping loss* that pulls tags of pixels
 belonging to the same leaf instance toward a common mean and pushes
@@ -33,15 +34,14 @@ segment-then-group) on identical pretrained weights.
 
 Loss
 ----
-The loss follows Newell et al. 2016 Section 3.4 (Instance Segmentation)
-**byte-for-byte**:
+The grouping terms follow Newell et al. 2016 Section 3.4 (Instance
+Segmentation), generalized from scalar tags to D-dimensional vectors:
 
     L_pull(per image)  = Σ_n Σ_{x,x' ∈ S_n} (h(x) - h(x'))²
     L_push(per image)  = Σ_{n≠n'} Σ_{x ∈ S_n, x' ∈ S_{n'}}
                             exp(-(h(x) - h(x'))² / 2σ²)
-    L_detection        = MSE between the predicted detection heatmap
-                         (sigmoid of semantic logits) and the union of
-                         instance masks
+    L_detection        = BCE-with-logits by default, or raw-output MSE
+                         for the paper-like experiment
 
     L_total = λ_pull · L_pull + λ_push · L_push + λ_det · L_detection
 
@@ -51,10 +51,9 @@ default). Pairwise sums are normalised by the number of pairs so the
 loss magnitude stays roughly stable as the number of instances per
 image varies.
 
-Detection: paper uses MSE on the heatmap "without sigmoid" but for
-numerical stability we apply sigmoid to the logits before MSE (target
-is the {0,1} union of instance masks). This is mathematically a
-constrained version of MSE-on-raw with the same gradient direction.
+The paper-like configuration is ``embedding_dim=1`` and
+``detection_loss="mse"``. The default configuration is an adaptation,
+not an exact reproduction of the paper.
 
 Usage
 -----
@@ -84,7 +83,7 @@ from torchvision.models.detection import (
 # Model
 # ════════════════════════════════════════════════════════════════════
 class PixelEmbeddingModel(nn.Module):
-    """ResNet-50 + FPN + 2 heads (semantic + 1-D embedding tag)."""
+    """ResNet-50 + FPN + semantic and D-dimensional embedding heads."""
 
     # ImageNet stats (same as torchvision MaskRCNN's internal normaliser)
     IMAGE_MEAN = (0.485, 0.456, 0.406)
@@ -191,7 +190,7 @@ def build_pixel_embed_model(
 # Loss — Newell associative-embedding / tagging loss
 # ════════════════════════════════════════════════════════════════════
 class TaggingLoss(nn.Module):
-    """Pull + push + MSE-detection loss for pixel-wise associative embedding.
+    """Pull + push + configurable detection loss for associative embedding.
 
     Implements Newell et al. 2016 Section 3.4 (Instance Segmentation)
     formula:
@@ -212,6 +211,9 @@ class TaggingLoss(nn.Module):
         min_pixels: instances with fewer than this many pixels are
             skipped; tiny instances would otherwise yield noisy samples.
         lambda_pull, lambda_push, lambda_detection: scalar weights.
+        detection_loss: ``"bce"`` for the adapted BCE-with-logits
+            foreground objective, or ``"mse"`` for Newell et al.'s
+            raw heatmap-regression objective.
     """
 
     def __init__(
@@ -222,14 +224,20 @@ class TaggingLoss(nn.Module):
         lambda_pull: float = 1.0,
         lambda_push: float = 1.0,
         lambda_detection: float = 1.0,
+        detection_loss: str = "bce",
     ):
         super().__init__()
+        if detection_loss not in {"bce", "mse"}:
+            raise ValueError(
+                f"detection_loss must be 'bce' or 'mse', got {detection_loss!r}"
+            )
         self.sigma = sigma
         self.n_sample = n_sample
         self.min_pixels = min_pixels
         self.lambda_pull = lambda_pull
         self.lambda_push = lambda_push
         self.lambda_detection = lambda_detection
+        self.detection_loss = detection_loss
 
     def _sample_tags(
         self, tag_map: torch.Tensor, mask: torch.Tensor, k: int
@@ -266,7 +274,7 @@ class TaggingLoss(nn.Module):
 
         for pred, tgt in zip(predictions, targets):
             sem_logit = pred["semantic"]            # (H, W)
-            tag_map = pred["embedding"]             # (H, W)
+            tag_map = pred["embedding"]             # (D, H, W)
 
             masks = tgt["masks"]
             if not torch.is_tensor(masks):
@@ -275,13 +283,18 @@ class TaggingLoss(nn.Module):
             if masks.numel() == 0:
                 continue
 
-            # ── Detection loss: BCE with logits (target = union of masks).
-            # v3 change: was MSE-on-sigmoid which saturates; BCE keeps
-            # gradients informative even at extreme logits.
+            # Detection target is the union of all visible instance masks.
+            # BCE is the adapted default.  Raw-output MSE reproduces the
+            # heatmap-regression formulation in Newell et al. section 3.4.
             det_target = (masks.sum(dim=0) > 0).float()
-            det_sum = det_sum + F.binary_cross_entropy_with_logits(
-                sem_logit, det_target, reduction="mean"
-            )
+            if self.detection_loss == "mse":
+                det_sum = det_sum + F.mse_loss(
+                    sem_logit, det_target, reduction="mean"
+                )
+            else:
+                det_sum = det_sum + F.binary_cross_entropy_with_logits(
+                    sem_logit, det_target, reduction="mean"
+                )
 
             # ── Sample K pixels per instance
             sampled: list[torch.Tensor] = []
