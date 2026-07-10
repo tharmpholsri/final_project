@@ -55,6 +55,7 @@ from final_project.models.pixel_embed import (
     TaggingLoss,
     build_pixel_embed_model,
 )
+from final_project.models.pixel_embed_decoder import build_pixel_embed_decoder_model
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -257,8 +258,23 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--cp-n-paste-max", type=int, default=4)
 
     # Model
+    ap.add_argument(
+        "--architecture",
+        choices=["p2", "decoder"],
+        default="p2",
+        help=(
+            "p2: predict heads at P2/H4 then upsample outputs; "
+            "decoder: upsample features to H2 and H before heads"
+        ),
+    )
     ap.add_argument("--trainable-backbone-layers", type=int, default=3)
     ap.add_argument("--head-channels", type=int, default=256)
+    ap.add_argument(
+        "--decoder-channels",
+        type=int,
+        default=64,
+        help="channels used after feature upsampling when --architecture decoder",
+    )
     ap.add_argument("--embedding-dim", type=int, default=16,
                     help="dimensionality of the per-pixel tag (v3 default)")
 
@@ -385,12 +401,21 @@ def main() -> None:
     )
 
     # Model + loss
-    model = build_pixel_embed_model(
-        pretrained=True,
-        trainable_backbone_layers=args.trainable_backbone_layers,
-        head_channels=args.head_channels,
-        embedding_dim=args.embedding_dim,
-    ).to(device)
+    if args.architecture == "decoder":
+        model = build_pixel_embed_decoder_model(
+            pretrained=True,
+            trainable_backbone_layers=args.trainable_backbone_layers,
+            head_channels=args.head_channels,
+            decoder_channels=args.decoder_channels,
+            embedding_dim=args.embedding_dim,
+        ).to(device)
+    else:
+        model = build_pixel_embed_model(
+            pretrained=True,
+            trainable_backbone_layers=args.trainable_backbone_layers,
+            head_channels=args.head_channels,
+            embedding_dim=args.embedding_dim,
+        ).to(device)
     loss_fn = TaggingLoss(
         sigma=args.sigma,
         n_sample=args.n_sample,

@@ -298,8 +298,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", default="results/pixel_embed_paperlike_val.json")
     parser.add_argument("--metrics-out", default=None)
     parser.add_argument("--device", default=None)
+    parser.add_argument(
+        "--architecture",
+        choices=["p2", "decoder"],
+        default="p2",
+        help="must match the architecture used during training",
+    )
     parser.add_argument("--trainable-backbone-layers", type=int, default=3)
     parser.add_argument("--head-channels", type=int, default=256)
+    parser.add_argument("--decoder-channels", type=int, default=64)
 
     parser.add_argument("--decoder", choices=["hist_nms", "meanshift"],
                         default="hist_nms")
@@ -339,7 +346,9 @@ def main() -> None:
         device,
         trainable_backbone_layers=args.trainable_backbone_layers,
         head_channels=args.head_channels,
+        decoder_channels=args.decoder_channels,
         embedding_dim=1,
+        architecture=args.architecture,
     )
     print(f"device: {device}")
     print(f"checkpoint: {args.checkpoint}")

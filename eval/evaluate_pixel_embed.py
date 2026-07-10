@@ -54,6 +54,7 @@ from final_project.eval.metrics import (
     format_per_stage_table,
 )
 from final_project.models.pixel_embed import build_pixel_embed_model
+from final_project.models.pixel_embed_decoder import build_pixel_embed_decoder_model
 
 
 def pick_device() -> torch.device:
@@ -72,15 +73,28 @@ def load_trained_model(
     device: torch.device,
     trainable_backbone_layers: int = 3,
     head_channels: int = 256,
+    decoder_channels: int = 64,
     embedding_dim: int = 16,
+    architecture: str = "p2",
 ) -> torch.nn.Module:
     """Build the pixel-embed model and load weights from a checkpoint."""
-    model = build_pixel_embed_model(
-        pretrained=False,
-        trainable_backbone_layers=trainable_backbone_layers,
-        head_channels=head_channels,
-        embedding_dim=embedding_dim,
-    )
+    if architecture == "decoder":
+        model = build_pixel_embed_decoder_model(
+            pretrained=False,
+            trainable_backbone_layers=trainable_backbone_layers,
+            head_channels=head_channels,
+            decoder_channels=decoder_channels,
+            embedding_dim=embedding_dim,
+        )
+    elif architecture == "p2":
+        model = build_pixel_embed_model(
+            pretrained=False,
+            trainable_backbone_layers=trainable_backbone_layers,
+            head_channels=head_channels,
+            embedding_dim=embedding_dim,
+        )
+    else:
+        raise ValueError(f"unknown architecture {architecture!r}")
     state = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if isinstance(state, dict) and "model" in state:
         model.load_state_dict(state["model"])
@@ -373,8 +387,15 @@ def parse_args() -> argparse.Namespace:
 
     # Checkpoint
     ap.add_argument("--checkpoint", default="checkpoints/pixel_embed_best.pth")
+    ap.add_argument(
+        "--architecture",
+        choices=["p2", "decoder"],
+        default="p2",
+        help="must match the architecture used during training",
+    )
     ap.add_argument("--trainable-backbone-layers", type=int, default=3)
     ap.add_argument("--head-channels", type=int, default=256)
+    ap.add_argument("--decoder-channels", type=int, default=64)
     ap.add_argument("--embedding-dim", type=int, default=16,
                     help="must match the dim the checkpoint was trained with")
 
@@ -419,7 +440,9 @@ def main() -> None:
         args.checkpoint, device,
         trainable_backbone_layers=args.trainable_backbone_layers,
         head_channels=args.head_channels,
+        decoder_channels=args.decoder_channels,
         embedding_dim=args.embedding_dim,
+        architecture=args.architecture,
     )
     if meta.get("epoch") is not None:
         print(f"  loaded from epoch {meta['epoch'] + 1}  "
