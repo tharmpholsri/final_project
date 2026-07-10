@@ -55,7 +55,10 @@ from final_project.models.pixel_embed import (
     TaggingLoss,
     build_pixel_embed_model,
 )
-from final_project.models.pixel_embed_decoder import build_pixel_embed_decoder_model
+from final_project.models.pixel_embed_decoder import (
+    build_pixel_embed_decoder_model,
+    build_pixel_embed_h2_decoder_model,
+)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -260,11 +263,12 @@ def parse_args() -> argparse.Namespace:
     # Model
     ap.add_argument(
         "--architecture",
-        choices=["p2", "decoder"],
+        choices=["p2", "decoder", "decoder_h2"],
         default="p2",
         help=(
             "p2: predict heads at P2/H4 then upsample outputs; "
-            "decoder: upsample features to H2 and H before heads"
+            "decoder: upsample features to H2 and H before heads; "
+            "decoder_h2: upsample features to H2 before heads, then upsample outputs"
         ),
     )
     ap.add_argument("--trainable-backbone-layers", type=int, default=3)
@@ -403,6 +407,14 @@ def main() -> None:
     # Model + loss
     if args.architecture == "decoder":
         model = build_pixel_embed_decoder_model(
+            pretrained=True,
+            trainable_backbone_layers=args.trainable_backbone_layers,
+            head_channels=args.head_channels,
+            decoder_channels=args.decoder_channels,
+            embedding_dim=args.embedding_dim,
+        ).to(device)
+    elif args.architecture == "decoder_h2":
+        model = build_pixel_embed_h2_decoder_model(
             pretrained=True,
             trainable_backbone_layers=args.trainable_backbone_layers,
             head_channels=args.head_channels,

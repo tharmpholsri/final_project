@@ -300,7 +300,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default=None)
     parser.add_argument(
         "--architecture",
-        choices=["p2", "decoder"],
+        choices=["p2", "decoder", "decoder_h2"],
         default="p2",
         help="must match the architecture used during training",
     )
