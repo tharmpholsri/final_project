@@ -251,6 +251,7 @@ def run_inference(
     bandwidth: float,
     semantic_threshold: float = 0.5,
     use_semantic_for_fg: bool = True,
+    foreground_source: str | None = None,
     min_pixels: int = 100,
     max_fit_points: int = 30000,
 ) -> list[dict]:
@@ -277,16 +278,24 @@ def run_inference(
         tag_map = outputs["embedding"].cpu().numpy()
         semantic_prob = 1.0 / (1.0 + np.exp(-semantic_logits))
 
-        # Build foreground mask
+        # Build foreground mask.
+        # Keep the old boolean behaviour for backwards compatibility:
+        #   use_semantic_for_fg=True  -> intersection
+        #   use_semantic_for_fg=False -> plant
+        # Newer runs should pass foreground_source explicitly.
+        fg_source = foreground_source
+        if fg_source is None:
+            fg_source = "intersection" if use_semantic_for_fg else "plant"
         plant_fg = load_plant_mask(file_name, plant_mask_dir, target_shape=(H, W))
-        if plant_fg is None:
-            # CVPPP image (no plant mask) — fall back to semantic only
+        if fg_source == "semantic" or plant_fg is None:
             foreground = (semantic_prob > semantic_threshold).astype(np.uint8)
-        elif use_semantic_for_fg:
+        elif fg_source == "intersection":
             foreground = (plant_fg.astype(bool)
                           & (semantic_prob > semantic_threshold)).astype(np.uint8)
-        else:
+        elif fg_source == "plant":
             foreground = plant_fg
+        else:
+            raise ValueError(f"unknown foreground_source={fg_source!r}")
 
         cluster_masks, _ = cluster_tags_kd(
             tag_map, foreground,
@@ -356,6 +365,7 @@ def sweep_bandwidths(
     bandwidths: Iterable[float],
     semantic_threshold: float,
     use_semantic_for_fg: bool,
+    foreground_source: str | None,
     min_pixels: int,
 ) -> tuple[list[dict], dict]:
     """Run inference for each bandwidth; pick the one with the best AP50."""
@@ -367,6 +377,7 @@ def sweep_bandwidths(
             bandwidth=bw,
             semantic_threshold=semantic_threshold,
             use_semantic_for_fg=use_semantic_for_fg,
+            foreground_source=foreground_source,
             min_pixels=min_pixels,
         )
         if not preds:
@@ -423,10 +434,20 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--bandwidth", type=float, default=0.5,
                     help="mean-shift bandwidth for 1-D tag clustering")
     ap.add_argument("--semantic-threshold", type=float, default=0.5)
+    ap.add_argument(
+        "--foreground-source",
+        choices=["semantic", "plant", "intersection"],
+        default=None,
+        help=(
+            "pixels used for clustering. Default keeps legacy behaviour: "
+            "intersection unless --no-semantic-for-fg is passed"
+        ),
+    )
     ap.add_argument("--use-semantic-for-fg", action="store_true", default=True,
-                    help="intersect plant mask with semantic prediction")
+                    help="legacy flag: use plant mask intersected with semantic prediction")
     ap.add_argument("--no-semantic-for-fg", dest="use_semantic_for_fg",
-                    action="store_false")
+                    action="store_false",
+                    help="legacy flag: use plant mask only")
     ap.add_argument("--min-pixels", type=int, default=100,
                     help="drop clusters smaller than this")
 
@@ -468,6 +489,10 @@ def main() -> None:
         print(f"  loaded from epoch {meta['epoch'] + 1}  "
               f"(best val_loss at train time: "
               f"{meta.get('best_val_loss', float('inf')):.4f})")
+    foreground_source = args.foreground_source
+    if foreground_source is None:
+        foreground_source = "intersection" if args.use_semantic_for_fg else "plant"
+    print(f"foreground source: {foreground_source}")
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -480,6 +505,7 @@ def main() -> None:
             bandwidths=bandwidths,
             semantic_threshold=args.semantic_threshold,
             use_semantic_for_fg=args.use_semantic_for_fg,
+            foreground_source=foreground_source,
             min_pixels=args.min_pixels,
         )
         sweep_csv = (
@@ -498,6 +524,7 @@ def main() -> None:
             bandwidth=best["bandwidth"],
             semantic_threshold=args.semantic_threshold,
             use_semantic_for_fg=args.use_semantic_for_fg,
+            foreground_source=foreground_source,
             min_pixels=args.min_pixels,
         )
         out_path.write_text(json.dumps(best_preds))
@@ -521,6 +548,7 @@ def main() -> None:
         bandwidth=args.bandwidth,
         semantic_threshold=args.semantic_threshold,
         use_semantic_for_fg=args.use_semantic_for_fg,
+        foreground_source=foreground_source,
         min_pixels=args.min_pixels,
     )
     out_path.write_text(json.dumps(preds))
