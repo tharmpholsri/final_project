@@ -56,6 +56,7 @@ from final_project.eval.metrics import (
 from final_project.models.pixel_embed import build_pixel_embed_model
 from final_project.models.pixel_embed_decoder import (
     build_pixel_embed_decoder_model,
+    build_pixel_embed_fpn_h2_decoder_model,
     build_pixel_embed_h2_decoder_model,
 )
 
@@ -91,6 +92,14 @@ def load_trained_model(
         )
     elif architecture == "decoder_h2":
         model = build_pixel_embed_h2_decoder_model(
+            pretrained=False,
+            trainable_backbone_layers=trainable_backbone_layers,
+            head_channels=head_channels,
+            decoder_channels=decoder_channels,
+            embedding_dim=embedding_dim,
+        )
+    elif architecture == "fpn_h2":
+        model = build_pixel_embed_fpn_h2_decoder_model(
             pretrained=False,
             trainable_backbone_layers=trainable_backbone_layers,
             head_channels=head_channels,
@@ -400,7 +409,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--checkpoint", default="checkpoints/pixel_embed_best.pth")
     ap.add_argument(
         "--architecture",
-        choices=["p2", "decoder", "decoder_h2"],
+        choices=["p2", "decoder", "decoder_h2", "fpn_h2"],
         default="p2",
         help="must match the architecture used during training",
     )

@@ -57,6 +57,7 @@ from final_project.models.pixel_embed import (
 )
 from final_project.models.pixel_embed_decoder import (
     build_pixel_embed_decoder_model,
+    build_pixel_embed_fpn_h2_decoder_model,
     build_pixel_embed_h2_decoder_model,
 )
 
@@ -263,12 +264,13 @@ def parse_args() -> argparse.Namespace:
     # Model
     ap.add_argument(
         "--architecture",
-        choices=["p2", "decoder", "decoder_h2"],
+        choices=["p2", "decoder", "decoder_h2", "fpn_h2"],
         default="p2",
         help=(
             "p2: predict heads at P2/H4 then upsample outputs; "
             "decoder: upsample features to H2 and H before heads; "
-            "decoder_h2: upsample features to H2 before heads, then upsample outputs"
+            "decoder_h2: upsample P2 features to H2 before heads, then upsample outputs; "
+            "fpn_h2: fuse P2-P5 at H4, upsample fused features to H2 before heads"
         ),
     )
     ap.add_argument("--trainable-backbone-layers", type=int, default=3)
@@ -415,6 +417,14 @@ def main() -> None:
         ).to(device)
     elif args.architecture == "decoder_h2":
         model = build_pixel_embed_h2_decoder_model(
+            pretrained=True,
+            trainable_backbone_layers=args.trainable_backbone_layers,
+            head_channels=args.head_channels,
+            decoder_channels=args.decoder_channels,
+            embedding_dim=args.embedding_dim,
+        ).to(device)
+    elif args.architecture == "fpn_h2":
+        model = build_pixel_embed_fpn_h2_decoder_model(
             pretrained=True,
             trainable_backbone_layers=args.trainable_backbone_layers,
             head_channels=args.head_channels,
