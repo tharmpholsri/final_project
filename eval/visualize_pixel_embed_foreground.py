@@ -118,6 +118,7 @@ def render_one(
     bandwidth: float,
     min_pixels: int,
     max_fit_points: int,
+    simple: bool,
 ) -> tuple[int, int]:
     info = coco.imgs[img_id]
     file_name = info["file_name"]
@@ -133,6 +134,26 @@ def render_one(
     gt_fg = gt_foreground(coco, img_id, (H, W))
     plant_fg = load_plant_mask(file_name, plant_mask_dir, target_shape=(H, W))
     sem_fg = (semantic_prob > semantic_threshold).astype(np.uint8)
+
+    n_gt = len(coco.getAnnIds(imgIds=img_id))
+    if simple:
+        fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+        axes[0].imshow(overlay_binary(img, gt_fg, color=(0.0, 1.0, 0.0), alpha=0.45))
+        axes[0].set_title(f"GT foreground\nGT leaves: {n_gt}")
+        axes[1].imshow(overlay_binary(img, sem_fg, color=(1.0, 0.0, 0.0), alpha=0.45))
+        axes[1].set_title(f"Predicted foreground\nthreshold={semantic_threshold}")
+        for ax in axes:
+            ax.axis("off")
+        fig.suptitle(
+            f"{file_name} | {architecture_name} | "
+            f"stage={stage_of(file_name) or 'unknown'}",
+            fontsize=11,
+        )
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=120, bbox_inches="tight")
+        plt.close(fig)
+        return n_gt, -1
+
     foreground = build_foreground(
         semantic_prob,
         plant_fg,
@@ -148,7 +169,6 @@ def render_one(
         rng=np.random.RandomState(0),
     )
 
-    n_gt = len(coco.getAnnIds(imgIds=img_id))
     n_pred = len(cluster_masks)
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
     axes = axes.ravel()
@@ -214,6 +234,11 @@ def main() -> None:
     parser.add_argument("--stage", choices=["early", "mid", "late", "canopy"],
                         default=None)
     parser.add_argument("--limit", type=int, default=12)
+    parser.add_argument(
+        "--simple",
+        action="store_true",
+        help="render only GT foreground vs predicted foreground mask",
+    )
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 
@@ -263,6 +288,7 @@ def main() -> None:
             bandwidth=args.bandwidth,
             min_pixels=args.min_pixels,
             max_fit_points=args.max_fit_points,
+            simple=args.simple,
         )
         rows.append((out_path.name, file_name, n_gt, n_pred))
         print(f"{i}/{len(img_ids)} {file_name}: GT={n_gt} pred={n_pred}")
