@@ -88,12 +88,12 @@ def gt_foreground(coco: COCO, img_id: int, shape: tuple[int, int]) -> np.ndarray
 
 
 def build_foreground(
-    semantic_prob: np.ndarray,
+    semantic_score: np.ndarray,
     plant_fg: np.ndarray | None,
     source: str,
     threshold: float,
 ) -> np.ndarray:
-    sem = semantic_prob > threshold
+    sem = semantic_score > threshold
     if source == "semantic" or plant_fg is None:
         return sem.astype(np.uint8)
     if source == "plant":
@@ -115,6 +115,7 @@ def render_one(
     architecture_name: str,
     foreground_source: str,
     semantic_threshold: float,
+    detection_activation: str,
     bandwidth: float,
     min_pixels: int,
     max_fit_points: int,
@@ -129,11 +130,18 @@ def render_one(
     output = model([tensor])[0]
     semantic_logits = output["semantic"].detach().cpu().numpy()
     tag_map = output["embedding"].detach().cpu().numpy()
-    semantic_prob = 1.0 / (1.0 + np.exp(-semantic_logits))
+    if detection_activation == "sigmoid":
+        semantic_score = 1.0 / (1.0 + np.exp(-semantic_logits))
+        score_vmin, score_vmax = 0.0, 1.0
+    elif detection_activation == "raw":
+        semantic_score = semantic_logits
+        score_vmin, score_vmax = None, None
+    else:
+        raise ValueError(f"unknown detection_activation={detection_activation!r}")
 
     gt_fg = gt_foreground(coco, img_id, (H, W))
     plant_fg = load_plant_mask(file_name, plant_mask_dir, target_shape=(H, W))
-    sem_fg = (semantic_prob > semantic_threshold).astype(np.uint8)
+    sem_fg = (semantic_score > semantic_threshold).astype(np.uint8)
 
     n_gt = len(coco.getAnnIds(imgIds=img_id))
     if simple:
@@ -155,7 +163,7 @@ def render_one(
         return n_gt, -1
 
     foreground = build_foreground(
-        semantic_prob,
+        semantic_score,
         plant_fg,
         foreground_source,
         semantic_threshold,
@@ -179,7 +187,7 @@ def render_one(
     axes[1].imshow(overlay_binary(img, gt_fg, color=(0.0, 1.0, 0.0), alpha=0.45))
     axes[1].set_title(f"GT foreground\nGT leaves: {n_gt}")
 
-    im = axes[2].imshow(semantic_prob, cmap="viridis", vmin=0, vmax=1)
+    im = axes[2].imshow(semantic_score, cmap="viridis", vmin=score_vmin, vmax=score_vmax)
     axes[2].set_title("pred foreground score")
     fig.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
 
@@ -228,6 +236,12 @@ def main() -> None:
                         choices=["semantic", "plant", "intersection"],
                         default="intersection")
     parser.add_argument("--semantic-threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--detection-activation",
+        choices=["raw", "sigmoid"],
+        default="sigmoid",
+        help="use raw for MSE-trained paper-like heatmaps; sigmoid for BCE-trained models",
+    )
     parser.add_argument("--bandwidth", type=float, default=0.5)
     parser.add_argument("--min-pixels", type=int, default=100)
     parser.add_argument("--max-fit-points", type=int, default=30000)
@@ -285,6 +299,7 @@ def main() -> None:
             architecture_name=args.architecture,
             foreground_source=args.foreground_source,
             semantic_threshold=args.semantic_threshold,
+            detection_activation=args.detection_activation,
             bandwidth=args.bandwidth,
             min_pixels=args.min_pixels,
             max_fit_points=args.max_fit_points,
