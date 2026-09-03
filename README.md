@@ -7,9 +7,8 @@ It compares three approaches:
 2. Mask R-CNN;
 3. a pixel-embedding model that groups pixels into leaf instances.
 
-The repository includes the source code and JHI leaf annotations. The image
-datasets, trained checkpoints, leaf bank and full model outputs are not
-included because of their size.
+This repository contains source code only. Datasets, annotations, trained
+checkpoints and generated outputs are not included.
 
 ## Directory structure
 
