@@ -1,38 +1,3 @@
-"""
-Evaluate a trained Mask R-CNN checkpoint on the PACE val or test set.
-
-Mirrors `evaluate_maskrcnn_zeroshot.py` but loads a checkpoint that was
-fine-tuned on CVPPP via `train_maskrcnn.py`. The model is built with
-`build_maskrcnn(num_classes=2)` (heads already swapped for our 2-class
-task) and the saved `state_dict` is loaded on top.
-
-Outputs
--------
-  - `<out>` (JSON): list of COCO-format prediction dicts, ready to feed
-    into pycocotools eval or the visualisation pipeline used for the
-    traditional methods.
-  - Stdout: overall metrics (AP50, AP, MAE, RMSE, DiC, prediction total)
-    plus the per-stage table (early / mid / late / canopy).
-  - Optional: `--sweep` mode iterates over a list of score thresholds
-    and picks the best by val AP50 (do this on val, not test).
-
-Usage
------
-    PY=/opt/miniconda3/envs/final_project/bin/python
-
-    # default: run best checkpoint on val
-    $PY -m final_project.eval.evaluate_maskrcnn
-
-    # final test eval with chosen score threshold
-    $PY -m final_project.eval.evaluate_maskrcnn \\
-        --coco annotations/instances_test_set.json \\
-        --out  results/maskrcnn_cvppp_test.json \\
-        --score-threshold 0.5
-
-    # sweep score thresholds on val (one inference pass, multiple eval)
-    $PY -m final_project.eval.evaluate_maskrcnn --sweep
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -56,19 +21,19 @@ from final_project.eval.metrics import (
 from final_project.models.mask_rcnn import build_maskrcnn, pick_device
 
 
-# ════════════════════════════════════════════════════════════════════
-# Checkpoint loading
-# ════════════════════════════════════════════════════════════════════
+
+
+
 def load_trained_model(
     checkpoint_path: str | Path,
     num_classes: int,
     device: torch.device,
     trainable_backbone_layers: int = 3,
 ) -> torch.nn.Module:
-    """Build a Mask R-CNN with our 2-class heads and load the trained weights."""
+    """Load a trained Mask R-CNN model."""
     model = build_maskrcnn(
         num_classes=num_classes,
-        pretrained=False,  # we are loading our own weights
+        pretrained=False,  
         trainable_backbone_layers=trainable_backbone_layers,
     )
     state = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -76,16 +41,16 @@ def load_trained_model(
         model.load_state_dict(state["model"])
         meta = {k: state.get(k) for k in ("epoch", "best_ap50")}
     else:
-        # bare state_dict
+        
         model.load_state_dict(state)
         meta = {}
     model.to(device).eval()
     return model, meta
 
 
-# ════════════════════════════════════════════════════════════════════
-# Inference
-# ════════════════════════════════════════════════════════════════════
+
+
+
 @torch.no_grad()
 def run_inference(
     model: torch.nn.Module,
@@ -96,13 +61,7 @@ def run_inference(
     mask_threshold: float = 0.5,
     min_mask_area: int = 30,
 ) -> list[dict]:
-    """Run the model on every image in `coco_path` and return COCO predictions.
-
-    The model is expected to be in eval mode and on `device`. Predictions
-    below `score_threshold` are dropped, masks are binarised at
-    `mask_threshold`, and tiny masks below `min_mask_area` are filtered
-    out (same as the zero-shot baseline for comparability).
-    """
+    """Run inference and return COCO predictions."""
     coco = COCO(str(coco_path))
     images_dir = Path(images_dir)
     predictions: list[dict] = []
@@ -121,7 +80,7 @@ def run_inference(
 
         out = model([tensor])[0]
         scores = out["scores"].cpu().numpy()
-        masks_prob = out["masks"].cpu().numpy().squeeze(1)  # (N, H, W)
+        masks_prob = out["masks"].cpu().numpy().squeeze(1)  
 
         keep = scores >= score_threshold
         for idx in np.where(keep)[0]:
@@ -151,11 +110,10 @@ def run_inference(
     return predictions
 
 
-# ════════════════════════════════════════════════════════════════════
-# Eval helpers
-# ════════════════════════════════════════════════════════════════════
+
+
+
 def compute_all_metrics(coco_path: str | Path, predictions: list[dict]) -> dict:
-    """Bundle AP, counting, and per-stage metrics into one dict."""
     if not predictions:
         return {
             "AP50": 0.0, "AP": 0.0, "AP75": 0.0,
@@ -195,9 +153,9 @@ def print_summary(metrics: dict, header: str = "") -> None:
         print(format_per_stage_table(metrics["per_stage"]))
 
 
-# ════════════════════════════════════════════════════════════════════
-# Sweep mode
-# ════════════════════════════════════════════════════════════════════
+
+
+
 def sweep_score_thresholds(
     model: torch.nn.Module,
     coco_path: str | Path,
@@ -207,10 +165,7 @@ def sweep_score_thresholds(
     mask_threshold: float,
     min_mask_area: int,
 ) -> tuple[list[dict], dict]:
-    """Run inference once at the lowest threshold, then re-eval at each higher.
-
-    Returns (rows for CSV, best row).
-    """
+    """Select the score threshold on validation data."""
     thresholds = sorted(thresholds)
     base_thr = thresholds[0]
     print(f"running inference at base threshold {base_thr:.2f} ...")
@@ -249,48 +204,29 @@ def sweep_score_thresholds(
     return rows, best
 
 
-# ════════════════════════════════════════════════════════════════════
-# Main
-# ════════════════════════════════════════════════════════════════════
+
+
+
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="Evaluate a trained Mask R-CNN checkpoint.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    # Data
+    
     ap.add_argument("--coco", default="annotations/instances_validation.json")
     ap.add_argument("--images-dir", default="crops_full/images")
-
-    # Checkpoint
     ap.add_argument("--checkpoint",
                     default="checkpoints/maskrcnn_cvppp_best.pth")
     ap.add_argument("--num-classes", type=int, default=2)
     ap.add_argument("--trainable-backbone-layers", type=int, default=3)
-
-    # Inference
     ap.add_argument("--score-threshold", type=float, default=0.5)
     ap.add_argument("--mask-threshold", type=float, default=0.5)
     ap.add_argument("--min-mask-area", type=int, default=30)
-
-    # Sweep
-    ap.add_argument("--sweep", action="store_true",
-                    help="sweep score thresholds 0.05–0.7")
-    ap.add_argument(
-        "--sweep-thresholds", default="0.05,0.1,0.2,0.3,0.4,0.5,0.6,0.7",
-        help="comma-separated thresholds for --sweep",
-    )
-
-    # Outputs
-    ap.add_argument("--out", default="results/maskrcnn_cvppp_val.json",
-                    help="path to write predictions JSON")
-    ap.add_argument("--metrics-out", default=None,
-                    help="optional path to write summary metrics JSON "
-                         "(default: alongside --out with .metrics.json)")
-    ap.add_argument("--sweep-csv", default=None,
-                    help="optional path to write sweep CSV "
-                         "(default: alongside --out as _sweep.csv)")
-
-    # Device
+    ap.add_argument('--sweep', action='store_true')
+    ap.add_argument('--sweep-thresholds', default='0.05,0.1,0.2,0.3,0.4,0.5,0.6,0.7')
+    ap.add_argument('--out', default='results/maskrcnn_cvppp_val.json')
+    ap.add_argument('--metrics-out', default=None)
+    ap.add_argument('--sweep-csv', default=None)
     ap.add_argument("--device", default=None)
 
     return ap.parse_args()
@@ -316,7 +252,7 @@ def main() -> None:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # ── Sweep mode ───────────────────────────────────────────────────
+    
     if args.sweep:
         thresholds = [float(x) for x in args.sweep_thresholds.split(",")]
         rows, best = sweep_score_thresholds(
@@ -333,9 +269,9 @@ def main() -> None:
             w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
             w.writeheader()
             w.writerows(rows)
-        print(f"sweep results → {sweep_csv}")
+        print(f"sweep results -> {sweep_csv}")
 
-        # Save final predictions at the best threshold
+        
         best_preds = run_inference(
             model, args.coco, args.images_dir, device,
             score_threshold=best["threshold"],
@@ -343,7 +279,7 @@ def main() -> None:
             min_mask_area=args.min_mask_area,
         )
         out_path.write_text(json.dumps(best_preds))
-        print(f"predictions at best threshold → {out_path}  "
+        print(f"predictions at best threshold -> {out_path}  "
               f"({len(best_preds)} instances)")
 
         metrics = compute_all_metrics(args.coco, best_preds)
@@ -353,10 +289,10 @@ def main() -> None:
             else out_path.with_suffix(".metrics.json")
         )
         metrics_path.write_text(json.dumps(metrics, indent=2))
-        print(f"metrics → {metrics_path}")
+        print(f"metrics -> {metrics_path}")
         return
 
-    # ── Single threshold mode ────────────────────────────────────────
+    
     preds = run_inference(
         model, args.coco, args.images_dir, device,
         score_threshold=args.score_threshold,
@@ -364,7 +300,7 @@ def main() -> None:
         min_mask_area=args.min_mask_area,
     )
     out_path.write_text(json.dumps(preds))
-    print(f"predictions → {out_path}  ({len(preds)} instances)")
+    print(f"predictions -> {out_path}  ({len(preds)} instances)")
 
     metrics = compute_all_metrics(args.coco, preds)
     print_summary(metrics, header=f"thr={args.score_threshold:.2f}")
@@ -374,7 +310,7 @@ def main() -> None:
         else out_path.with_suffix(".metrics.json")
     )
     metrics_path.write_text(json.dumps(metrics, indent=2))
-    print(f"metrics → {metrics_path}")
+    print(f"metrics -> {metrics_path}")
 
 
 if __name__ == "__main__":
