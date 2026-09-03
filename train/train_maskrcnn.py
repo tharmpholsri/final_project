@@ -1,40 +1,3 @@
-"""
-Fine-tune Mask R-CNN on CVPPP for lettuce leaf instance segmentation.
-
-Starts from COCO V2 pretrained weights (via `build_maskrcnn`), trains on
-the CVPPP COCO-converted dataset (3,799 leaf instances across 347 images),
-and validates on the PACE val split every epoch.
-
-Checkpointing strategy
-----------------------
-For each training run we maintain only a small set of files in `checkpoints/`:
-
-  - `<name>_best.pth`        overwritten when val AP50 improves (weights only)
-  - `<name>_last.pth`        overwritten every epoch (weights + optimizer +
-                             scheduler — resumable)
-  - `<name>_epoch_NN.pth`    snapshot every `--snapshot-every` epochs
-                             (weights only) — for training-dynamics analysis
-
-Per-epoch metrics (train losses + val AP50/MAE/etc.) are appended to a JSON
-history file so training curves can be reconstructed without re-running.
-
-Usage
------
-    # default run (25 epochs, SGD lr=0.005, snapshots every 5 epochs)
-    python -m final_project.train.train_maskrcnn
-
-    # adjust epochs / lr / device
-    python -m final_project.train.train_maskrcnn \\
-        --epochs 30 --lr 0.005 --batch-size 4 --device cuda
-
-    # resume from last checkpoint
-    python -m final_project.train.train_maskrcnn \\
-        --resume checkpoints/maskrcnn_cvppp_last.pth
-
-    # disable snapshots (only keep best + last)
-    python -m final_project.train.train_maskrcnn --snapshot-every 0
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -65,9 +28,9 @@ from final_project.models.mask_rcnn import (
 )
 
 
-# ════════════════════════════════════════════════════════════════════
-# Reproducibility
-# ════════════════════════════════════════════════════════════════════
+
+
+
 def set_seed(seed: int = 42) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -76,9 +39,9 @@ def set_seed(seed: int = 42) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-# ════════════════════════════════════════════════════════════════════
-# Checkpoint I/O
-# ════════════════════════════════════════════════════════════════════
+
+
+
 def save_checkpoint(
     path: Path,
     model: torch.nn.Module,
@@ -89,12 +52,7 @@ def save_checkpoint(
     config: dict | None = None,
     weights_only: bool = False,
 ) -> None:
-    """Save model (and optionally optimizer/scheduler) to disk.
-
-    weights_only=True drops the optimizer + scheduler state, ~halving the
-    file size. Use this for `best` and periodic snapshots; keep the full
-    state for `last` so training can resume.
-    """
+    """Save a training checkpoint."""
     state: dict = {"model": model.state_dict()}
     if not weights_only:
         if optimizer is not None:
@@ -114,10 +72,7 @@ def load_checkpoint(
     lr_scheduler=None,
     device: torch.device | None = None,
 ) -> tuple[int | None, float]:
-    """Restore weights (and optionally optimizer/scheduler) from a checkpoint.
-
-    Returns (last_epoch, best_ap50_so_far).
-    """
+    """Load a training checkpoint."""
     state = torch.load(path, map_location=device, weights_only=False)
     model.load_state_dict(state["model"])
     if optimizer is not None and "optimizer" in state:
@@ -127,9 +82,9 @@ def load_checkpoint(
     return state.get("epoch"), state.get("best_ap50") or 0.0
 
 
-# ════════════════════════════════════════════════════════════════════
-# Helpers
-# ════════════════════════════════════════════════════════════════════
+
+
+
 def move_to_device(images, targets, device):
     images = [img.to(device) for img in images]
     targets = [
@@ -140,9 +95,9 @@ def move_to_device(images, targets, device):
     return images, targets
 
 
-# ════════════════════════════════════════════════════════════════════
-# Train / eval loops
-# ════════════════════════════════════════════════════════════════════
+
+
+
 def train_one_epoch(
     model: torch.nn.Module,
     loader: DataLoader,
@@ -152,7 +107,7 @@ def train_one_epoch(
     log_every: int = 50,
     grad_clip: float = 10.0,
 ) -> dict:
-    """Run one training epoch. Returns mean per-loss values."""
+    """Train for one epoch."""
     model.train()
     losses_sum: dict = {}
     n_batches = 0
@@ -203,7 +158,7 @@ def evaluate(
     mask_threshold: float = 0.5,
     min_mask_area: int = 30,
 ) -> dict:
-    """Run inference on a dataset and compute AP50 + counting metrics."""
+    """Evaluate AP and counting metrics."""
     model.eval()
     predictions: list[dict] = []
 
@@ -213,7 +168,7 @@ def evaluate(
         out = model([image])[0]
 
         scores = out["scores"].cpu().numpy()
-        masks_prob = out["masks"].cpu().numpy().squeeze(1)  # (N, H, W)
+        masks_prob = out["masks"].cpu().numpy().squeeze(1)  
         img_id = int(target["image_id"].item())
 
         keep = scores >= score_threshold
@@ -259,16 +214,16 @@ def evaluate(
     }
 
 
-# ════════════════════════════════════════════════════════════════════
-# Main
-# ════════════════════════════════════════════════════════════════════
+
+
+
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="Fine-tune Mask R-CNN on CVPPP, validate on PACE val.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # Data
+    
     ap.add_argument("--train-coco", default="annotations/cvppp_coco.json")
     ap.add_argument(
         "--train-images",
@@ -285,7 +240,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--val-coco", default="annotations/instances_validation.json")
     ap.add_argument("--val-images", default="crops_full/images")
 
-    # Copy-paste augmentation (applied to the extra/PACE source only)
+    
     ap.add_argument("--copy-paste", action="store_true",
                     help="enable copy-paste augmentation on --train-coco-extra")
     ap.add_argument("--leaf-bank", default="leaf_bank")
@@ -296,12 +251,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--cp-n-paste-min", type=int, default=1)
     ap.add_argument("--cp-n-paste-max", type=int, default=4)
 
-    # Model
+    
     ap.add_argument("--num-classes", type=int, default=2)
     ap.add_argument("--trainable-backbone-layers", type=int, default=3,
                     help="how many of the last 5 ResNet stages to fine-tune")
 
-    # Training
+    
     ap.add_argument("--epochs", type=int, default=25)
     ap.add_argument("--batch-size", type=int, default=2)
     ap.add_argument("--num-workers", type=int, default=2)
@@ -313,18 +268,18 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--grad-clip", type=float, default=10.0)
     ap.add_argument("--seed", type=int, default=42)
 
-    # Evaluation
+    
     ap.add_argument("--val-score-threshold", type=float, default=0.5)
     ap.add_argument("--val-mask-threshold", type=float, default=0.5)
 
-    # Checkpointing
+    
     ap.add_argument("--ckpt-dir", default="checkpoints")
     ap.add_argument("--ckpt-name", default="maskrcnn_cvppp")
     ap.add_argument("--snapshot-every", type=int, default=5,
                     help="save weights-only snapshot every N epochs (0=off)")
     ap.add_argument("--resume", default=None, help="path to a 'last' ckpt")
 
-    # Logging
+    
     ap.add_argument(
         "--history-path",
         default="results/maskrcnn_cvppp_history.json",
@@ -335,7 +290,7 @@ def parse_args() -> argparse.Namespace:
     )
     ap.add_argument("--log-every", type=int, default=50)
 
-    # Device
+    
     ap.add_argument("--device", default=None,
                     help="cuda / mps / cpu (auto-pick if omitted)")
 
@@ -345,14 +300,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    # ── setup ────────────────────────────────────────────────────────
+    
     set_seed(args.seed)
     device = torch.device(args.device) if args.device else pick_device()
     print(f"device: {device}")
     print(f"seed:   {args.seed}")
 
-    # Datasets + loaders
-    # Primary source (CVPPP by default) — no copy-paste, just basic aug.
+    
+    
     primary_ds = LettuceCOCODataset(
         images_dir=args.train_images,
         coco_path=args.train_coco,
@@ -363,7 +318,7 @@ def main() -> None:
 
     datasets: list = [primary_ds]
 
-    # Optional 2nd source (PACE canopy) — gets copy-paste if --copy-paste.
+    
     if args.train_coco_extra and args.train_images_extra:
         cp_transform = None
         if args.copy_paste:
@@ -419,7 +374,7 @@ def main() -> None:
         persistent_workers=args.num_workers > 0,
     )
 
-    # Model
+    
     model = build_maskrcnn(
         num_classes=args.num_classes,
         pretrained=True,
@@ -430,7 +385,7 @@ def main() -> None:
     print(f"params: total={p['total']:,}  trainable={p['trainable']:,}  "
           f"frozen={p['frozen']:,}")
 
-    # Optimizer + LR scheduler
+    
     trainable_params = [p_ for p_ in model.parameters() if p_.requires_grad]
     optimizer = torch.optim.SGD(
         trainable_params,
@@ -444,14 +399,14 @@ def main() -> None:
         gamma=args.lr_gamma,
     )
 
-    # Save config alongside checkpoints for reproducibility
+    
     config = vars(args).copy()
     config_path = Path(args.config_path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(config, indent=2))
     print(f"config written → {config_path}")
 
-    # ── resume ───────────────────────────────────────────────────────
+    
     start_epoch = 0
     best_ap50 = 0.0
     if args.resume:
@@ -464,7 +419,7 @@ def main() -> None:
         print(f"  resumed at epoch {start_epoch}, "
               f"best AP50 so far: {best_ap50:.4f}")
 
-    # ── train ────────────────────────────────────────────────────────
+    
     ckpt_dir = Path(args.ckpt_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     history_path = Path(args.history_path)
@@ -497,7 +452,7 @@ def main() -> None:
             f"pred={val_metrics['pred_total']}"
         )
 
-        # Append to history JSON
+        
         history.append({
             "epoch": epoch + 1,
             "lr": optimizer.param_groups[0]["lr"],
@@ -506,7 +461,7 @@ def main() -> None:
         })
         history_path.write_text(json.dumps(history, indent=2))
 
-        # ── save: last (resumable), best, periodic snapshots ─────────
+        
         save_checkpoint(
             ckpt_dir / f"{args.ckpt_name}_last.pth",
             model, optimizer, lr_scheduler,
