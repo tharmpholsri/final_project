@@ -1,37 +1,3 @@
-"""
-Evaluate a trained pixel-embedding checkpoint.
-
-Mirrors `evaluate_maskrcnn.py` so the final headline tables can be
-filled in the same way. Inference works in four steps per image:
-
-  1. Forward pass → semantic logits + 1-D tag map (full image
-     resolution).
-  2. Determine the foreground pixels — by default, use the provided
-     plant mask (`crops_full/masks/<crop>.png`) as the prior, optionally
-     intersected with the model's own semantic prediction. Supervisor
-     approved this in meeting 2 ("OK to assume background is segmented").
-  3. Cluster the foreground tags with mean-shift (sklearn). Each
-     resulting cluster is one leaf instance.
-  4. Encode each cluster mask as a COCO prediction and feed into the
-     same `compute_segmentation_ap` / `compute_counting_metrics` /
-     `compute_per_stage_metrics` we use for every other method.
-
-Two-step protocol — sweep on val, evaluate on test
---------------------------------------------------
-    # 1. Sweep bandwidth on val to pick the operating point
-    python -m final_project.eval.evaluate_pixel_embed --sweep \\
-        --checkpoint checkpoints/pixel_embed_best.pth \\
-        --coco annotations/instances_validation.json \\
-        --out results/pixel_embed_val.json
-
-    # 2. Eval on test with the chosen bandwidth
-    python -m final_project.eval.evaluate_pixel_embed \\
-        --checkpoint checkpoints/pixel_embed_best.pth \\
-        --coco annotations/instances_test_set.json \\
-        --bandwidth 0.5 \\
-        --out results/pixel_embed_test.json
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -69,9 +35,9 @@ def pick_device() -> torch.device:
     return torch.device("cpu")
 
 
-# ════════════════════════════════════════════════════════════════════
-# Checkpoint loading
-# ════════════════════════════════════════════════════════════════════
+
+
+
 def load_trained_model(
     checkpoint_path: str | Path,
     device: torch.device,
@@ -81,7 +47,7 @@ def load_trained_model(
     embedding_dim: int = 16,
     architecture: str = "p2",
 ) -> torch.nn.Module:
-    """Build the pixel-embed model and load weights from a checkpoint."""
+    """Load a trained pixel-embedding model."""
     if architecture == "decoder":
         model = build_pixel_embed_decoder_model(
             pretrained=False,
@@ -126,23 +92,21 @@ def load_trained_model(
     return model, meta
 
 
-# ════════════════════════════════════════════════════════════════════
-# Foreground + clustering
-# ════════════════════════════════════════════════════════════════════
+
+
+
 def load_plant_mask(
     file_name: str,
     plant_mask_dir: Path,
     target_shape: tuple[int, int] | None = None,
 ) -> np.ndarray | None:
-    """Load the plant mask for a crop. Returns binary (H, W) or None
-    if the file does not exist."""
     p = plant_mask_dir / Path(file_name).name
     if not p.exists():
         return None
     arr = np.array(Image.open(p))
     fg = (arr > 0).astype(np.uint8)
     if target_shape is not None and fg.shape != target_shape:
-        return None  # refuse to misalign
+        return None  
     return fg
 
 
@@ -154,15 +118,7 @@ def cluster_tags_kd(
     max_fit_points: int = 30000,
     rng: np.random.RandomState | None = None,
 ) -> tuple[list[np.ndarray], np.ndarray | None]:
-    """Cluster foreground tag vectors with mean-shift; return per-cluster masks.
-
-    Accepts either a 2-D tag map (H, W)  — legacy 1-D embedding —
-    or a 3-D tag map (D, H, W) — multi-dim embedding (v3).
-
-    Returns:
-        masks: list of (H, W) uint8 binary masks, one per cluster.
-        labels: full-resolution per-foreground-pixel label array.
-    """
+    """Cluster foreground embeddings with mean shift."""
     if tag_map.ndim == 2:
         H, W = tag_map.shape
         D = 1
@@ -178,9 +134,9 @@ def cluster_tags_kd(
     if tag_map.ndim == 2:
         fg_tags = tag_map[ys, xs].reshape(-1, 1).astype(np.float32)
     else:
-        fg_tags = tag_map[:, ys, xs].T.astype(np.float32)        # (N_fg, D)
+        fg_tags = tag_map[:, ys, xs].T.astype(np.float32)        
 
-    # Subsample for speed during the cluster-fit step.
+    
     if fg_tags.shape[0] > max_fit_points:
         rng = rng or np.random.RandomState(0)
         sel = rng.choice(fg_tags.shape[0], max_fit_points, replace=False)
@@ -192,7 +148,7 @@ def cluster_tags_kd(
     try:
         ms.fit(fit_tags)
     except ValueError:
-        # bandwidth too small for the data — bail out cleanly
+        
         return [], None
     labels_all = ms.predict(fg_tags)
 
@@ -212,9 +168,7 @@ def predictions_for_image(
     cluster_masks: list[np.ndarray],
     semantic_prob: np.ndarray,
 ) -> list[dict]:
-    """Encode each cluster mask as a COCO-format prediction. The 'score'
-    field is the mean semantic-foreground probability over the cluster,
-    which serves as a per-instance confidence proxy."""
+    """Convert clustered masks to COCO predictions."""
     preds: list[dict] = []
     for m in cluster_masks:
         if m.sum() == 0:
@@ -238,9 +192,9 @@ def predictions_for_image(
     return preds
 
 
-# ════════════════════════════════════════════════════════════════════
-# Inference loop
-# ════════════════════════════════════════════════════════════════════
+
+
+
 @torch.no_grad()
 def run_inference(
     model: torch.nn.Module,
@@ -255,7 +209,7 @@ def run_inference(
     min_pixels: int = 100,
     max_fit_points: int = 30000,
 ) -> list[dict]:
-    """Forward + cluster + format predictions for an entire dataset."""
+    """Run inference and cluster the embeddings."""
     coco = COCO(str(coco_path))
     images_dir = Path(images_dir)
     plant_mask_dir = Path(plant_mask_dir)
@@ -278,11 +232,11 @@ def run_inference(
         tag_map = outputs["embedding"].cpu().numpy()
         semantic_prob = 1.0 / (1.0 + np.exp(-semantic_logits))
 
-        # Build foreground mask.
-        # Keep the old boolean behaviour for backwards compatibility:
-        #   use_semantic_for_fg=True  -> intersection
-        #   use_semantic_for_fg=False -> plant
-        # Newer runs should pass foreground_source explicitly.
+        
+        
+        
+        
+        
         fg_source = foreground_source
         if fg_source is None:
             fg_source = "intersection" if use_semantic_for_fg else "plant"
@@ -311,9 +265,9 @@ def run_inference(
     return all_preds
 
 
-# ════════════════════════════════════════════════════════════════════
-# Evaluation helpers
-# ════════════════════════════════════════════════════════════════════
+
+
+
 def compute_all_metrics(
     coco_path: str | Path, predictions: list[dict]
 ) -> dict:
@@ -353,9 +307,9 @@ def print_summary(metrics: dict, header: str = "") -> None:
         print(format_per_stage_table(metrics["per_stage"]))
 
 
-# ════════════════════════════════════════════════════════════════════
-# Sweep
-# ════════════════════════════════════════════════════════════════════
+
+
+
 def sweep_bandwidths(
     model: torch.nn.Module,
     coco_path: str | Path,
@@ -368,7 +322,7 @@ def sweep_bandwidths(
     foreground_source: str | None,
     min_pixels: int,
 ) -> tuple[list[dict], dict]:
-    """Run inference for each bandwidth; pick the one with the best AP50."""
+    """Select the mean-shift bandwidth on validation data."""
     rows: list[dict] = []
     for bw in bandwidths:
         print(f"  bandwidth = {bw:.3f} ...")
@@ -403,68 +357,45 @@ def sweep_bandwidths(
     return rows, best
 
 
-# ════════════════════════════════════════════════════════════════════
-# Main
-# ════════════════════════════════════════════════════════════════════
+
+
+
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="Evaluate a trained pixel-embedding checkpoint.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    # Data
+    
     ap.add_argument("--coco", default="annotations/instances_validation.json")
     ap.add_argument("--images-dir", default="crops_full/images")
     ap.add_argument("--plant-mask-dir", default="crops_full/masks")
 
-    # Checkpoint
+    
     ap.add_argument("--checkpoint", default="checkpoints/pixel_embed_best.pth")
-    ap.add_argument(
-        "--architecture",
-        choices=["p2", "decoder", "decoder_h2", "fpn_h2"],
-        default="p2",
-        help="must match the architecture used during training",
-    )
+    ap.add_argument('--architecture', choices=['p2', 'decoder', 'decoder_h2', 'fpn_h2'], default='p2')
     ap.add_argument("--trainable-backbone-layers", type=int, default=3)
     ap.add_argument("--head-channels", type=int, default=256)
     ap.add_argument("--decoder-channels", type=int, default=64)
-    ap.add_argument("--embedding-dim", type=int, default=16,
-                    help="must match the dim the checkpoint was trained with")
+    ap.add_argument('--embedding-dim', type=int, default=16)
 
-    # Clustering
-    ap.add_argument("--bandwidth", type=float, default=0.5,
-                    help="mean-shift bandwidth for 1-D tag clustering")
+    
+    ap.add_argument('--bandwidth', type=float, default=0.5)
     ap.add_argument("--semantic-threshold", type=float, default=0.5)
-    ap.add_argument(
-        "--foreground-source",
-        choices=["semantic", "plant", "intersection"],
-        default=None,
-        help=(
-            "pixels used for clustering. Default keeps legacy behaviour: "
-            "intersection unless --no-semantic-for-fg is passed"
-        ),
-    )
-    ap.add_argument("--use-semantic-for-fg", action="store_true", default=True,
-                    help="legacy flag: use plant mask intersected with semantic prediction")
-    ap.add_argument("--no-semantic-for-fg", dest="use_semantic_for_fg",
-                    action="store_false",
-                    help="legacy flag: use plant mask only")
-    ap.add_argument("--min-pixels", type=int, default=100,
-                    help="drop clusters smaller than this")
+    ap.add_argument('--foreground-source', choices=['semantic', 'plant', 'intersection'], default=None)
+    ap.add_argument('--use-semantic-for-fg', action='store_true', default=True)
+    ap.add_argument('--no-semantic-for-fg', dest='use_semantic_for_fg', action='store_false')
+    ap.add_argument('--min-pixels', type=int, default=100)
 
-    # Sweep
-    ap.add_argument("--sweep", action="store_true",
-                    help="sweep bandwidth and pick the best by AP50")
-    ap.add_argument("--sweep-bandwidths",
-                    default="0.3,0.5,0.75,1.0,1.5,2.0,3.0,5.0",
-                    help="comma-separated bandwidths for --sweep. "
-                         "v3 default range widened for D-dim embedding space.")
+    
+    ap.add_argument('--sweep', action='store_true')
+    ap.add_argument('--sweep-bandwidths', default='0.3,0.5,0.75,1.0,1.5,2.0,3.0,5.0')
 
-    # Outputs
+    
     ap.add_argument("--out", default="results/pixel_embed_val.json")
     ap.add_argument("--metrics-out", default=None)
     ap.add_argument("--sweep-csv", default=None)
 
-    # Device
+    
     ap.add_argument("--device", default=None)
 
     return ap.parse_args()
@@ -497,7 +428,7 @@ def main() -> None:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # ── Sweep mode ───────────────────────────────────────────────────
+    
     if args.sweep:
         bandwidths = [float(x) for x in args.sweep_bandwidths.split(",")]
         rows, best = sweep_bandwidths(
@@ -516,9 +447,9 @@ def main() -> None:
             w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
             w.writeheader()
             w.writerows(rows)
-        print(f"sweep results → {sweep_csv}")
+        print(f"sweep results -> {sweep_csv}")
 
-        # Re-run final predictions at the best bandwidth
+        
         best_preds = run_inference(
             model, args.coco, args.images_dir, args.plant_mask_dir, device,
             bandwidth=best["bandwidth"],
@@ -528,7 +459,7 @@ def main() -> None:
             min_pixels=args.min_pixels,
         )
         out_path.write_text(json.dumps(best_preds))
-        print(f"predictions at best bandwidth → {out_path}  "
+        print(f"predictions at best bandwidth -> {out_path}  "
               f"({len(best_preds)} instances)")
 
         metrics = compute_all_metrics(args.coco, best_preds)
@@ -539,10 +470,10 @@ def main() -> None:
             else out_path.with_suffix(".metrics.json")
         )
         metrics_path.write_text(json.dumps(metrics, indent=2))
-        print(f"metrics → {metrics_path}")
+        print(f"metrics -> {metrics_path}")
         return
 
-    # ── Single bandwidth mode ────────────────────────────────────────
+    
     preds = run_inference(
         model, args.coco, args.images_dir, args.plant_mask_dir, device,
         bandwidth=args.bandwidth,
@@ -552,7 +483,7 @@ def main() -> None:
         min_pixels=args.min_pixels,
     )
     out_path.write_text(json.dumps(preds))
-    print(f"predictions → {out_path}  ({len(preds)} instances)")
+    print(f"predictions -> {out_path}  ({len(preds)} instances)")
 
     metrics = compute_all_metrics(args.coco, preds)
     print_summary(metrics, header=f"bandwidth={args.bandwidth:.3f}")
@@ -562,7 +493,7 @@ def main() -> None:
         else out_path.with_suffix(".metrics.json")
     )
     metrics_path.write_text(json.dumps(metrics, indent=2))
-    print(f"metrics → {metrics_path}")
+    print(f"metrics -> {metrics_path}")
 
 
 if __name__ == "__main__":

@@ -1,37 +1,3 @@
-"""
-Fine-tune the pixel-embedding model on CVPPP (+ optional PACE canopy + copy-paste).
-
-Mirrors the structure of `final_project/train/train_maskrcnn.py` so that
-results are directly comparable: same training data, same val/test split,
-same checkpointing pattern, same logging format. The only differences
-are the model (`PixelEmbeddingModel`) and the loss (`TaggingLoss`), and
-the fact that per-epoch validation tracks the loss components rather
-than AP50 (clustering + AP50 happens in the separate
-`evaluate_pixel_embed.py` script — see Phase 3).
-
-Checkpointing strategy
-----------------------
-Identical to `train_maskrcnn.py`:
-  - <name>_best.pth     overwritten when val_total loss improves (weights only)
-  - <name>_last.pth     overwritten every epoch (weights + optimizer + scheduler)
-  - <name>_epoch_NN.pth weights-only snapshot every `--snapshot-every` epochs
-
-Usage
------
-    # default — CVPPP only, no copy-paste, 25 epochs
-    python -m final_project.train.train_pixel_embed
-
-    # match the variant C training data (CVPPP + PACE + copy-paste)
-    python -m final_project.train.train_pixel_embed \\
-        --train-coco-extra annotations/instances_train_set.json \\
-        --train-images-extra crops_full/images \\
-        --copy-paste --leaf-bank leaf_bank --pots-dir crops_full/pots
-
-    # resume from a 'last' checkpoint
-    python -m final_project.train.train_pixel_embed \\
-        --resume checkpoints/pixel_embed_last.pth
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -62,9 +28,9 @@ from final_project.models.pixel_embed_decoder import (
 )
 
 
-# ════════════════════════════════════════════════════════════════════
-# Reproducibility
-# ════════════════════════════════════════════════════════════════════
+
+
+
 def set_seed(seed: int = 42) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -81,9 +47,9 @@ def pick_device() -> torch.device:
     return torch.device("cpu")
 
 
-# ════════════════════════════════════════════════════════════════════
-# Checkpoint I/O
-# ════════════════════════════════════════════════════════════════════
+
+
+
 def save_checkpoint(
     path: Path,
     model: torch.nn.Module,
@@ -122,9 +88,9 @@ def load_checkpoint(
     return state.get("epoch"), state.get("best_val_loss") or float("inf")
 
 
-# ════════════════════════════════════════════════════════════════════
-# Helpers
-# ════════════════════════════════════════════════════════════════════
+
+
+
 def move_images(images, device):
     return [img.to(device) for img in images]
 
@@ -139,9 +105,9 @@ def move_targets(targets, device):
     return out
 
 
-# ════════════════════════════════════════════════════════════════════
-# Train / eval loops
-# ════════════════════════════════════════════════════════════════════
+
+
+
 def train_one_epoch(
     model: PixelEmbeddingModel,
     loss_fn: TaggingLoss,
@@ -152,7 +118,7 @@ def train_one_epoch(
     log_every: int = 50,
     grad_clip: float = 10.0,
 ) -> dict:
-    """One epoch of training. Returns mean loss components for the epoch."""
+    """Train for one epoch."""
     model.train()
     sums = {"loss_pull": 0.0, "loss_push": 0.0, "loss_detection": 0.0, "total": 0.0}
     n_batches = 0
@@ -206,12 +172,7 @@ def validate_loss(
     dataset: LettuceCOCODataset,
     device: torch.device,
 ) -> dict:
-    """Run the model on a dataset and compute the loss components.
-
-    Used as the per-epoch validation signal for picking best checkpoint.
-    The full instance-level evaluation (clustering + AP50 + counting
-    metrics) lives in `evaluate_pixel_embed.py`.
-    """
+    """Calculate validation loss."""
     model.eval()
     sums = {"loss_pull": 0.0, "loss_push": 0.0, "loss_detection": 0.0, "total": 0.0}
     n = 0
@@ -230,29 +191,29 @@ def validate_loss(
     return {k: v / max(n, 1) for k, v in sums.items()}
 
 
-# ════════════════════════════════════════════════════════════════════
-# Main
-# ════════════════════════════════════════════════════════════════════
+
+
+
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="Fine-tune the pixel-embedding model.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # Data — primary
+    
     ap.add_argument("--train-coco", default="annotations/cvppp_coco.json")
     ap.add_argument(
         "--train-images",
         default="Plant_Phenotyping_Datasets/Plant_Phenotyping_Datasets/Plant",
     )
-    # Data — optional extra (PACE)
+    
     ap.add_argument("--train-coco-extra", default=None)
     ap.add_argument("--train-images-extra", default=None)
-    # Val
+    
     ap.add_argument("--val-coco", default="annotations/instances_validation.json")
     ap.add_argument("--val-images", default="crops_full/images")
 
-    # Copy-paste augmentation (applied to extra/PACE source only)
+    
     ap.add_argument("--copy-paste", action="store_true")
     ap.add_argument("--leaf-bank", default="leaf_bank")
     ap.add_argument("--pots-dir", default="crops_full/pots")
@@ -261,45 +222,23 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--cp-n-paste-min", type=int, default=1)
     ap.add_argument("--cp-n-paste-max", type=int, default=4)
 
-    # Model
-    ap.add_argument(
-        "--architecture",
-        choices=["p2", "decoder", "decoder_h2", "fpn_h2"],
-        default="p2",
-        help=(
-            "p2: predict heads at P2/H4 then upsample outputs; "
-            "decoder: upsample features to H2 and H before heads; "
-            "decoder_h2: upsample P2 features to H2 before heads, then upsample outputs; "
-            "fpn_h2: fuse P2-P5 at H4, upsample fused features to H2 before heads"
-        ),
-    )
+    
+    ap.add_argument('--architecture', choices=['p2', 'decoder', 'decoder_h2', 'fpn_h2'], default='p2')
     ap.add_argument("--trainable-backbone-layers", type=int, default=3)
     ap.add_argument("--head-channels", type=int, default=256)
-    ap.add_argument(
-        "--decoder-channels",
-        type=int,
-        default=64,
-        help="channels used after feature upsampling when --architecture decoder",
-    )
-    ap.add_argument("--embedding-dim", type=int, default=16,
-                    help="dimensionality of the per-pixel tag (v3 default)")
+    ap.add_argument('--decoder-channels', type=int, default=64)
+    ap.add_argument('--embedding-dim', type=int, default=16)
 
-    # Loss
-    ap.add_argument("--sigma", type=float, default=1.0,
-                    help="Gaussian bandwidth for the push term")
-    ap.add_argument("--n-sample", type=int, default=20,
-                    help="K pixels sampled per instance for pairwise terms")
-    ap.add_argument("--min-pixels", type=int, default=10,
-                    help="ignore instances with fewer than this many pixels")
+    
+    ap.add_argument('--sigma', type=float, default=1.0)
+    ap.add_argument('--n-sample', type=int, default=20)
+    ap.add_argument('--min-pixels', type=int, default=10)
     ap.add_argument("--lambda-pull", type=float, default=1.0)
     ap.add_argument("--lambda-push", type=float, default=1.0)
     ap.add_argument("--lambda-detection", type=float, default=1.0)
-    ap.add_argument(
-        "--detection-loss", choices=["bce", "mse"], default="bce",
-        help="foreground objective; use mse for the paper-like heatmap loss",
-    )
+    ap.add_argument('--detection-loss', choices=['bce', 'mse'], default='bce')
 
-    # Training
+    
     ap.add_argument("--epochs", type=int, default=25)
     ap.add_argument("--batch-size", type=int, default=2)
     ap.add_argument("--num-workers", type=int, default=2)
@@ -311,13 +250,13 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--grad-clip", type=float, default=10.0)
     ap.add_argument("--seed", type=int, default=42)
 
-    # Checkpointing
+    
     ap.add_argument("--ckpt-dir", default="checkpoints")
     ap.add_argument("--ckpt-name", default="pixel_embed")
     ap.add_argument("--snapshot-every", type=int, default=5)
     ap.add_argument("--resume", default=None)
 
-    # Logging
+    
     ap.add_argument(
         "--history-path",
         default="results/pixel_embed_history.json",
@@ -328,7 +267,7 @@ def parse_args() -> argparse.Namespace:
     )
     ap.add_argument("--log-every", type=int, default=50)
 
-    # Device
+    
     ap.add_argument("--device", default=None)
 
     return ap.parse_args()
@@ -337,13 +276,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    # ── setup ────────────────────────────────────────────────────────
+    
     set_seed(args.seed)
     device = torch.device(args.device) if args.device else pick_device()
     print(f"device: {device}")
     print(f"seed:   {args.seed}")
 
-    # Datasets
+    
     primary_ds = LettuceCOCODataset(
         images_dir=args.train_images,
         coco_path=args.train_coco,
@@ -406,7 +345,7 @@ def main() -> None:
         persistent_workers=args.num_workers > 0,
     )
 
-    # Model + loss
+    
     if args.architecture == "decoder":
         model = build_pixel_embed_decoder_model(
             pretrained=True,
@@ -453,7 +392,7 @@ def main() -> None:
     print(f"params: total={n_total:,}  trainable={n_train:,}  "
           f"frozen={n_total - n_train:,}")
 
-    # Optimizer + scheduler
+    
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.SGD(
         trainable_params,
@@ -471,9 +410,9 @@ def main() -> None:
     config_path = Path(args.config_path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(config, indent=2))
-    print(f"config written → {config_path}")
+    print(f"config written -> {config_path}")
 
-    # ── resume ───────────────────────────────────────────────────────
+    
     start_epoch = 0
     best_val_loss = float("inf")
     if args.resume:
@@ -486,7 +425,7 @@ def main() -> None:
         print(f"  resumed at epoch {start_epoch}, "
               f"best_val_loss so far: {best_val_loss:.4f}")
 
-    # ── train ────────────────────────────────────────────────────────
+    
     ckpt_dir = Path(args.ckpt_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     history_path = Path(args.history_path)
@@ -522,14 +461,14 @@ def main() -> None:
         })
         history_path.write_text(json.dumps(history, indent=2))
 
-        # ── save: last (resumable) ──────────────────────────────────
+        
         save_checkpoint(
             ckpt_dir / f"{args.ckpt_name}_last.pth",
             model, optimizer, lr_scheduler,
             epoch=epoch, best_val_loss=best_val_loss, config=config,
         )
 
-        # ── save: best ──────────────────────────────────────────────
+        
         if val_losses["total"] < best_val_loss:
             best_val_loss = val_losses["total"]
             save_checkpoint(
@@ -538,9 +477,9 @@ def main() -> None:
                 epoch=epoch, best_val_loss=best_val_loss, config=config,
                 weights_only=True,
             )
-            print(f"  ★ new best val_total = {best_val_loss:.4f} → saved")
+            print(f"  new best validation loss = {best_val_loss:.4f}, saved")
 
-        # ── save: periodic snapshot ─────────────────────────────────
+        
         if args.snapshot_every > 0 and (epoch + 1) % args.snapshot_every == 0:
             snap_path = (
                 ckpt_dir / f"{args.ckpt_name}_epoch_{epoch + 1:02d}.pth"
@@ -550,10 +489,10 @@ def main() -> None:
                 epoch=epoch, best_val_loss=best_val_loss, config=config,
                 weights_only=True,
             )
-            print(f"  snapshot → {snap_path.name}")
+            print(f"  snapshot -> {snap_path.name}")
 
     print(f"\ntraining complete. best val_total: {best_val_loss:.4f}")
-    print(f"history → {history_path}")
+    print(f"history -> {history_path}")
 
 
 if __name__ == "__main__":

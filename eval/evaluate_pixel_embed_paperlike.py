@@ -1,35 +1,3 @@
-"""Evaluate a paper-like 1-D associative-embedding model.
-
-This decoder follows Newell, Huang, and Deng (2016), section 3.4:
-threshold the foreground heatmap, build a histogram of scalar tags, find
-identifier peaks with 1-D non-maximum suppression, and assign every
-foreground pixel to its nearest identifier.  A 1-D MeanShift decoder is
-also available as a controlled post-processing comparison.
-
-Train a compatible checkpoint (pretrained backbone, scalar tag, raw MSE
-foreground heatmap) with::
-
-    python -m final_project.train.train_pixel_embed \
-        --embedding-dim 1 --detection-loss mse \
-        --ckpt-name pixel_embed_paperlike
-
-Evaluate on validation before using the selected settings on test::
-
-    python -m final_project.eval.evaluate_pixel_embed_paperlike \
-        --checkpoint checkpoints/pixel_embed_paperlike_best.pth \
-        --coco annotations/instances_validation.json \
-        --decoder hist_nms \
-        --out results/pixel_embed_paperlike_val.json
-
-Tune histogram resolution and NMS prominence on validation only::
-
-    python -m final_project.eval.evaluate_pixel_embed_paperlike \
-        --checkpoint checkpoints/pixel_embed_paperlike_best.pth \
-        --decoder hist_nms --sweep \
-        --sweep-bins 128,256,512 \
-        --sweep-prominence 0.01,0.02,0.05,0.10
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -66,12 +34,7 @@ def decode_histogram_nms(
     clip_percentile: float = 0.5,
     min_pixels: int = 100,
 ) -> tuple[list[np.ndarray], np.ndarray]:
-    """Decode scalar tags using histogram peaks and nearest-tag assignment.
-
-    ``peak_prominence`` is a fraction of the largest smoothed histogram
-    count. ``clip_percentile`` clips symmetric tag outliers only when
-    estimating the histogram range; every foreground pixel is still assigned.
-    """
+    """Group scalar tags using histogram peaks."""
     if tag_map.ndim == 3 and tag_map.shape[0] == 1:
         tag_map = tag_map[0]
     if tag_map.ndim != 2:
@@ -107,8 +70,8 @@ def decode_histogram_nms(
         )
         prominence = max(float(smooth.max()) * peak_prominence, 0.0)
 
-        # Padding permits a mode at either edge of the clipped range to be
-        # selected; scipy.find_peaks otherwise excludes array endpoints.
+        
+        
         padded = np.pad(smooth, (1, 1), mode="constant")
         peaks, _ = find_peaks(
             padded,
@@ -210,9 +173,9 @@ def run_inference(args: argparse.Namespace, model: torch.nn.Module, device) -> l
                 rng=rng,
             )
 
-        # COCO evaluation uses scores for ranking and does not require them
-        # to lie in [0, 1]. Preserve raw MSE scores rather than clipping or
-        # normalising per image, both of which can damage cross-image ranking.
+        
+        
+        
         confidence = detection_score
         predictions.extend(
             predictions_for_image(image_id, masks, confidence)
@@ -221,7 +184,6 @@ def run_inference(args: argparse.Namespace, model: torch.nn.Module, device) -> l
 
 
 def parse_csv_values(value: str, cast, name: str) -> list:
-    """Parse and validate a non-empty comma-separated CLI grid."""
     try:
         values = [cast(item.strip()) for item in value.split(",") if item.strip()]
     except ValueError as exc:
@@ -236,7 +198,7 @@ def run_histogram_sweep(
     model: torch.nn.Module,
     device: torch.device,
 ) -> tuple[list[dict], dict, list[dict]]:
-    """Tune histogram bins and NMS prominence on validation AP50."""
+    """Select histogram settings on validation data."""
     bins_grid = parse_csv_values(args.sweep_bins, int, "--sweep-bins")
     prominence_grid = parse_csv_values(
         args.sweep_prominence, float, "--sweep-prominence"
@@ -298,12 +260,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", default="results/pixel_embed_paperlike_val.json")
     parser.add_argument("--metrics-out", default=None)
     parser.add_argument("--device", default=None)
-    parser.add_argument(
-        "--architecture",
-        choices=["p2", "decoder", "decoder_h2", "fpn_h2"],
-        default="p2",
-        help="must match the architecture used during training",
-    )
+    parser.add_argument('--architecture', choices=['p2', 'decoder', 'decoder_h2', 'fpn_h2'], default='p2')
     parser.add_argument("--trainable-backbone-layers", type=int, default=3)
     parser.add_argument("--head-channels", type=int, default=256)
     parser.add_argument("--decoder-channels", type=int, default=64)
@@ -313,25 +270,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--foreground-source",
                         choices=["semantic", "plant", "intersection"],
                         default="semantic")
-    parser.add_argument("--detection-activation", choices=["raw", "sigmoid"],
-                        default="raw",
-                        help="raw matches an MSE-trained paper-like heatmap")
+    parser.add_argument('--detection-activation', choices=['raw', 'sigmoid'], default='raw')
     parser.add_argument("--detection-threshold", type=float, default=0.5)
     parser.add_argument("--min-pixels", type=int, default=100)
 
     parser.add_argument("--hist-bins", type=int, default=256)
     parser.add_argument("--hist-smooth-sigma", type=float, default=2.0)
-    parser.add_argument("--peak-prominence", type=float, default=0.02,
-                        help="fraction of maximum smoothed histogram count")
-    parser.add_argument("--peak-distance", type=int, default=5,
-                        help="minimum separation between histogram peaks in bins")
+    parser.add_argument('--peak-prominence', type=float, default=0.02)
+    parser.add_argument('--peak-distance', type=int, default=5)
     parser.add_argument("--tag-clip-percentile", type=float, default=0.5)
 
     parser.add_argument("--bandwidth", type=float, default=0.5)
     parser.add_argument("--max-fit-points", type=int, default=30000)
 
-    parser.add_argument("--sweep", action="store_true",
-                        help="tune histogram bins and peak prominence by AP50")
+    parser.add_argument('--sweep', action='store_true')
     parser.add_argument("--sweep-bins", default="128,256,512")
     parser.add_argument("--sweep-prominence", default="0.01,0.02,0.05,0.10")
     parser.add_argument("--sweep-csv", default=None)
